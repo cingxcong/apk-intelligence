@@ -249,7 +249,7 @@ def test_method_level_evidence_skips_rows_without_method_identity(tmp_path: Path
             "operands": "Ldalvik/system/DexClassLoader;",
         },
     ]
-    instructions.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+    instructions.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     evidence = cli._method_level_evidence(instructions)["dynamic_code_loading"]
 
