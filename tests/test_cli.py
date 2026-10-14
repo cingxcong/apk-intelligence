@@ -184,7 +184,7 @@ def test_method_level_evidence_links_api_reference_to_method(tmp_path: Path) -> 
             "method_name": "loadPlugin",
             "method_descriptor": "()V",
             "opcode": "invoke-virtual",
-            "operands": "Ldalvik/system/DexClassLoader;",
+            "operands": "v0, Ldalvik/system/DexClassLoader;-><init>(Ljava/lang/ClassLoader;)V",
             "method_code_offset_bytes": 42,
         }) + "\n"
         + "not valid json\n",
@@ -201,6 +201,10 @@ def test_method_level_evidence_links_api_reference_to_method(tmp_path: Path) -> 
     assert item["method_code_offset_bytes"] == 42
     assert item["occurrences"] == 1
     assert item["evidence_type"] == "androguard_instruction_api_reference"
+    assert item["target_class_descriptor"] == "Ldalvik/system/DexClassLoader;"
+    assert item["target_method_name"] == "<init>"
+    assert item["target_method_descriptor"] == "(Ljava/lang/ClassLoader;)V"
+    assert item["target_resolution"] == "symbolic_target_only"
 
 
 def test_method_level_evidence_aggregates_repeated_api_hits_and_keeps_offsets(tmp_path: Path) -> None:
