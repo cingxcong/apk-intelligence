@@ -233,7 +233,7 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
             from androguard.core.apk import APK  # type: ignore
             from androguard.core.dex import DEX  # type: ignore
             status["available"] = True
-            print("[apkintel] Androguard parsing started; using DEX inventory mode (cross-reference graph disabled for performance).", file=sys.stderr, flush=True)
+            print("[apkintel] Androguard parsing started; using DEX inventory mode with bounded symbolic invoke-target extraction.", file=sys.stderr, flush=True)
             apk_obj = APK(str(apk_path))
             # Androguard 4.1.x exposes get_all_dex() as a generator.
             # Materialize it once so progress reporting can safely use len().
