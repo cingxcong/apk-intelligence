@@ -1,0 +1,86 @@
+name: APK Intelligence
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: HTTPS URL of an APK you are authorized to analyze
+        required: true
+        type: string
+      max_download_mb:
+        description: Maximum download size in MB (10–250)
+        required: true
+        default: "250"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apk-analysis-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Set up Java for Android tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install optional reverse-engineering tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jadx apktool
+          python -m pip install --upgrade pip
+          python -m pip install '.[androguard]' apkid
+      - name: Validate download size input
+        env:
+          MAX_MB: ${{ inputs.max_download_mb }}
+        run: |
+          python - <<'PY'
+          import os
+          value = int(os.environ['MAX_MB'])
+          if not 10 <= value <= 250:
+              raise SystemExit('max_download_mb must be between 10 and 250')
+          PY
+      - name: Download and statically analyze APK
+        env:
+          APK_URL: ${{ inputs.apk_url }}
+          MAX_MB: ${{ inputs.max_download_mb }}
+        run: |
+          python -m apkintel analyze-url "$APK_URL" --max-bytes "$((MAX_MB * 1024 * 1024))" --out analysis-output
+      - name: Package analysis bundle
+        if: always()
+        run: |
+          if [ -d analysis-output ]; then
+            python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root = Path('analysis-output')
+          with zipfile.ZipFile('apk-intelligence-report.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for p in root.rglob('*'):
+                  if p.is_file() and p.name != 'sample.apk':
+                      z.write(p, p.relative_to(root.parent))
+          PY
+          fi
+      - name: Upload analysis report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-intelligence-report-${{ github.run_id }}
+          path: |
+            apk-intelligence-report.zip
+            analysis-output/summary.md
+            analysis-output/manifest.json
+          if-no-files-found: warn
+          retention-days: 7
