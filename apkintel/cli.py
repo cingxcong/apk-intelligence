@@ -25,6 +25,8 @@ SCAN_CHUNK_BYTES = 1024 * 1024
 SCAN_OVERLAP_BYTES = 512
 _PRINTABLE_RUN_RE = re.compile(rb"[\x20-\x7e]+")
 MAX_STRING_ROWS = 200_000
+MAX_REFERENCE_ROWS = 200_000
+_METHOD_REFERENCE_RE = re.compile(r"(?P<class>L[^;\s]+;)->(?P<name>[^\s(]+)(?P<descriptor>\([^\s]*\)[^\s,]*)")
 TEXT_EXTENSIONS = (".xml", ".txt", ".json", ".properties", ".yml", ".yaml", ".html", ".js", ".smali", ".mf", ".cfg", ".ini")
 SUSPICIOUS_PATTERNS = [
     ("dynamic_code_loading", re.compile(r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader"), "Dynamic code-loading API reference found."),
@@ -207,6 +209,14 @@ def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, jav
     return record
 
 
+def _parse_method_reference(operands: str) -> dict[str, str] | None:
+    """Extract a direct DEX method target from Androguard's rendered invoke operands."""
+    match = _METHOD_REFERENCE_RE.search(operands)
+    if match is None:
+        return None
+    return {"target_class_descriptor": match.group("class"), "target_method_name": match.group("name"), "target_method_descriptor": match.group("descriptor")}
+
+
 def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | None = 100_000) -> dict[str, Any]:
     """Stream Androguard records to JSONL instead of accumulating result lists."""
     status: dict[str, Any] = {"available": False, "status": "skipped", "note": "Install a compatible Androguard release to enable structured class/method extraction.", "max_methods": max_methods}
@@ -234,12 +244,13 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
                 dex = DEX(dex_payload)
                 dexes.append(dex)
             print(f"[apkintel] Androguard: DEX parsing complete ({len(dexes)} DEX file(s)); extracting classes and methods.", file=sys.stderr, flush=True)
-            status["cross_references"] = "disabled_for_performance"
+            status["cross_references"] = "bounded_instruction_operand_scan"
             try:
                 status["app_metadata"] = {"package_name": apk_obj.get_package(), "version_name": apk_obj.get_androidversion_name(), "version_code": apk_obj.get_androidversion_code(), "permissions": sorted(set(apk_obj.get_permissions() or []))}
             except Exception as exc:
                 status["app_metadata_error"] = f"{type(exc).__name__}: {exc}"
             methods_seen = 0
+            references_truncated = False
             truncated = False
             for dex_index, dex in enumerate(dexes):
                 for cls in dex.get_classes():
@@ -268,7 +279,16 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
                                 try:
                                     for ins in method.get_instructions():
                                         length = int(ins.get_length()) if hasattr(ins, "get_length") else 0
-                                        writers["instructions"].write({"dex_index": dex_index, "class_descriptor": descriptor, "method_name": method_name, "method_descriptor": method_descriptor, "method_code_offset_bytes": offset, "opcode": str(ins.get_name()) if hasattr(ins, "get_name") else type(ins).__name__, "operands": str(ins.get_output())[:2000] if hasattr(ins, "get_output") else "", "length_bytes": length, "evidence_type": "androguard_instruction"})
+                                        opcode = str(ins.get_name()) if hasattr(ins, "get_name") else type(ins).__name__
+                                        operands = str(ins.get_output())[:2000] if hasattr(ins, "get_output") else ""
+                                        writers["instructions"].write({"dex_index": dex_index, "class_descriptor": descriptor, "method_name": method_name, "method_descriptor": method_descriptor, "method_code_offset_bytes": offset, "opcode": opcode, "operands": operands, "length_bytes": length, "evidence_type": "androguard_instruction"})
+                                        if opcode.startswith("invoke-"):
+                                            target = _parse_method_reference(operands)
+                                            if target is not None:
+                                                if writers["references"].count < MAX_REFERENCE_ROWS:
+                                                    writers["references"].write({"dex_index": dex_index, "caller_class_descriptor": descriptor, "caller_method_name": method_name, "caller_method_descriptor": method_descriptor, "method_code_offset_bytes": offset, **target, "evidence_type": "invoke_instruction_operand", "resolution": "symbolic_target_only"})
+                                                else:
+                                                    references_truncated = True
                                         offset += max(0, length)
                                         count += 1
                                 except Exception as exc:
@@ -277,7 +297,9 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
                         except Exception as exc:
                             row["code_extraction_error"] = f"{type(exc).__name__}: {exc}"
                         writers["methods"].write(row)
-            status.update({"status": "ok", "dex_objects": len(dexes), "classes": writers["classes"].count, "methods": writers["methods"].count, "instructions": writers["instructions"].count, "references": writers["references"].count, "truncated": truncated, "cross_references": "disabled_for_performance"})
+            status.update({"status": "ok", "dex_objects": len(dexes), "classes": writers["classes"].count, "methods": writers["methods"].count, "instructions": writers["instructions"].count, "references": writers["references"].count, "truncated": truncated, "references_truncated": references_truncated, "cross_references": "bounded_instruction_operand_scan"})
+            if references_truncated:
+                status["reference_note"] = f"Reference output reached the {MAX_REFERENCE_ROWS} row cap; additional invoke targets were omitted."
             if truncated:
                 status["note"] = f"Class inventory completed; method and instruction output truncated at --max-methods={max_methods}. Remaining methods and instructions were not emitted."
         except Exception as exc:
