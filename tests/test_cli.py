@@ -202,7 +202,7 @@ def test_method_level_evidence_aggregates_repeated_api_hits_and_keeps_offsets(tm
         {**base, "method_code_offset_bytes": 24},
     ]
     instructions.write_text(
-        "".join(json.dumps(row) + "\\n" for row in rows) + json.dumps(["not", "an", "instruction"]) + "\\n",
+        "".join(json.dumps(row) + "\n" for row in rows) + json.dumps(["not", "an", "instruction"]) + "\n",
         encoding="utf-8",
     )
 
