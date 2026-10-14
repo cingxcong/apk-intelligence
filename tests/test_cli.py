@@ -18,6 +18,23 @@ def _findings(output: Path) -> list[dict]:
     return json.loads((output / "findings.json").read_text(encoding="utf-8"))["findings"]
 
 
+
+def test_parse_method_reference_from_invoke_operands() -> None:
+    parsed = cli._parse_method_reference(
+        "v0, Lcom/example/PluginLoader;->loadPlugin(Ljava/lang/String;)V"
+    )
+
+    assert parsed == {
+        "target_class_descriptor": "Lcom/example/PluginLoader;",
+        "target_method_name": "loadPlugin",
+        "target_method_descriptor": "(Ljava/lang/String;)V",
+    }
+
+
+def test_parse_method_reference_ignores_non_method_operands() -> None:
+    assert cli._parse_method_reference("v0, v1") is None
+    assert cli._parse_method_reference("Lcom/example/Plugin;->field:Ljava/lang/String;") is None
+
 def test_large_dex_is_scanned_for_patterns_and_strings(tmp_path: Path) -> None:
     apk = tmp_path / "large.apk"
     # Place the marker across the chunk boundary to exercise overlap handling.
