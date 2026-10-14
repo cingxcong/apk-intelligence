@@ -124,7 +124,7 @@ jobs:
                   except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
                       print(f"JADX download attempt {attempt}/3 failed: {exc}")
                       if attempt == 3:
-                          print("WARNING: Could not download JADX; continuing without it.")
+                          print("WARNING: Could not download JADX; continuing without JADX.")
                           raise SystemExit(0)
                       time.sleep(2 ** attempt)
 
@@ -190,9 +190,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apk-intelligence-report-${{ github.run_id }}
-          path: |
-            apk-intelligence-report.zip
-            analysis-output/summary.md
-            analysis-output/manifest.json
+          path: apk-intelligence-report.zip
           if-no-files-found: warn
           retention-days: 7
