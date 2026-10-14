@@ -96,3 +96,21 @@ def test_max_methods_zero_means_unlimited_and_negative_is_rejected(tmp_path: Pat
     assert cli.main(["analyze-url", "https://example.com/a.apk", "--out", str(tmp_path / "out"), "--max-methods", "0"]) == 0
     assert seen["max_methods"] is None
     assert cli.main(["analyze-url", "https://example.com/a.apk", "--out", str(tmp_path / "out"), "--max-methods", "-1"]) == 2
+
+def test_require_androguard_returns_nonzero_when_extraction_fails(tmp_path: Path, monkeypatch, capsys) -> None:
+    downloaded = tmp_path / "fake.apk"
+    monkeypatch.setattr(cli, "download_apk", lambda *args, **kwargs: downloaded)
+    monkeypatch.setattr(cli, "analyze_apk", lambda *args, **kwargs: {
+        "sample": {"sha256": "x"},
+        "archive": {"dex_count": 1},
+        "androguard_extraction": {"status": "error", "error": "simulated parser failure"},
+    })
+
+    result = cli.main([
+        "analyze-url", "https://example.com/a.apk",
+        "--out", str(tmp_path / "out"),
+        "--require-androguard",
+    ])
+
+    assert result == 3
+    assert "Androguard was required" in capsys.readouterr().err
