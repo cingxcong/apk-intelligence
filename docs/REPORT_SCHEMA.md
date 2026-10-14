@@ -4,12 +4,14 @@
 
 | File | Purpose |
 |---|---|
-| `manifest.json` | Sample identity, hashes, timestamps, tool inventory, coverage and limitations |
+| `manifest.json` | Sample identity, hashes, timestamps, tool inventory, app metadata, coverage and limitations |
 | `files.jsonl` | APK archive entries, CRC, sizes and SHA-256 |
-| `dex.jsonl` | DEX raw-byte hashes and selected header fields with byte-range references |
-| `classes.jsonl` | Parsed class descriptors when Androguard support is available |
-| `methods.jsonl` | Parsed method names, descriptors and access flags when available |
-| `strings.jsonl` | Printable string candidates with source archive path and approximate byte offset |
+| `dex.jsonl` | DEX raw-byte hashes, header fingerprints and header byte-range references |
+| `classes.jsonl` | Parsed class descriptors and inheritance metadata when Androguard support is available |
+| `methods.jsonl` | Parsed method descriptors, access flags, code hashes/sizes, and instruction counts when available |
+| `instructions.jsonl` | Decoded instruction mnemonic/operands and byte offsets within each method's code stream when exposed by Androguard |
+| `references.jsonl` | Method cross-reference edges returned by the parser |
+| `strings.jsonl` | Printable string candidates with source archive path and approximate character offset |
 | `findings.json` | Structured findings and evidence objects |
 | `summary.md` | Compact analyst and AI orientation |
 | `tool-logs/` | Captured output from optional tools |
@@ -23,7 +25,7 @@
 
 ## Evidence quality
 
-Hashes identify exact byte sequences. Archive paths identify the evidence container. DEX header offsets are exact. Printable string offsets are explicitly approximate because the current pass uses a decoded text view; they are not Dalvik instruction offsets. Class/method rows depend on parser compatibility and must be read alongside `manifest.json` coverage status.
+Hashes identify exact byte sequences. Archive paths identify the evidence container. DEX header offsets are exact. Instruction offsets, when available, are offsets within the method's code stream, not absolute offsets in the APK or DEX file. Printable string offsets are explicitly approximate character positions in decoded text; they are not byte or instruction offsets. Class/method/reference rows depend on parser compatibility and must be read alongside `manifest.json` coverage status.
 
 ## Security limits
 
