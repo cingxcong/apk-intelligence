@@ -226,7 +226,9 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
             status["available"] = True
             print("[apkintel] Androguard parsing started; using DEX inventory mode (cross-reference graph disabled for performance).", file=sys.stderr, flush=True)
             apk_obj = APK(str(apk_path))
-            dex_payloads = apk_obj.get_all_dex()
+            # Androguard 4.1.x exposes get_all_dex() as a generator.
+            # Materialize it once so progress reporting can safely use len().
+            dex_payloads = list(apk_obj.get_all_dex())
             dexes = []
             analysis = Analysis()
             for dex_index, dex_payload in enumerate(dex_payloads):
