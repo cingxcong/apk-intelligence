@@ -67,6 +67,8 @@ jobs:
 
       - name: Install optional reverse-engineering tools
         if: ${{ !inputs.skip_optional_tools }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends apktool unzip
@@ -74,32 +76,72 @@ jobs:
           import json
           import os
           import pathlib
+          import time
+          import urllib.error
           import urllib.request
           import zipfile
 
           api = "https://api.github.com/repos/skylot/jadx/releases/latest"
-          request = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json", "User-Agent": "apk-intelligence-ci"})
-          with urllib.request.urlopen(request, timeout=30) as response:
-              release = json.load(response)
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "apk-intelligence-ci",
+          }
+          token = os.environ.get("GH_TOKEN")
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+
+          release = None
+          for attempt in range(1, 4):
+              try:
+                  request = urllib.request.Request(api, headers=headers)
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      release = json.load(response)
+                  break
+              except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+                  print(f"JADX release lookup attempt {attempt}/3 failed: {exc}")
+                  if attempt < 3:
+                      time.sleep(2 ** attempt)
+
+          if release is None:
+              print("WARNING: Could not retrieve JADX release metadata; continuing without JADX.")
+              raise SystemExit(0)
+
           asset = next((item for item in release.get("assets", []) if item["name"].endswith(".zip") and item["name"].startswith("jadx-")), None)
           if asset is None:
-              raise SystemExit("Could not find a JADX release ZIP asset")
+              print("WARNING: No JADX release ZIP found; continuing without JADX.")
+              raise SystemExit(0)
+
           target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "jadx"
           target.mkdir(parents=True, exist_ok=True)
           archive = target / "jadx.zip"
           download_request = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "apk-intelligence-ci"})
-          with urllib.request.urlopen(download_request, timeout=120) as response, archive.open("wb") as output:
-              output.write(response.read())
-          with zipfile.ZipFile(archive) as zf:
-              zf.extractall(target)
+          try:
+              for attempt in range(1, 4):
+                  try:
+                      with urllib.request.urlopen(download_request, timeout=120) as response, archive.open("wb") as output:
+                          output.write(response.read())
+                      break
+                  except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+                      print(f"JADX download attempt {attempt}/3 failed: {exc}")
+                      if attempt == 3:
+                          print("WARNING: Could not download JADX; continuing without it.")
+                          raise SystemExit(0)
+                      time.sleep(2 ** attempt)
+
+              with zipfile.ZipFile(archive) as zf:
+                  zf.extractall(target)
+          except zipfile.BadZipFile:
+              print("WARNING: Downloaded JADX archive is invalid; continuing without JADX.")
+              raise SystemExit(0)
+
           bins = [p for p in target.rglob("jadx") if p.is_file() and p.parent.name == "bin"]
           if not bins:
-              sample = [str(p.relative_to(target)) for p in target.rglob("*") if p.is_file()][:30]
-              raise SystemExit("Could not locate JADX CLI under a bin/ directory. Extracted files: " + ", ".join(sample))
+              print("WARNING: Could not locate JADX CLI; continuing without JADX.")
+              raise SystemExit(0)
           bin_dir = bins[0].parent
           os.chmod(bins[0], 0o755)
           with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path_file:
-              path_file.write(str(bin_dir) + "\n")
+              path_file.write(str(bin_dir) + "\\n")
           print(f"Installed JADX from release {release.get('tag_name', 'unknown')}")
           PY
       - name: Validate download size input
