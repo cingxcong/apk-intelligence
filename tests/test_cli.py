@@ -120,9 +120,9 @@ def test_require_androguard_returns_nonzero_when_extraction_fails(tmp_path: Path
 def test_dex_coverage_summary_compares_header_and_parsed_class_counts(tmp_path: Path) -> None:
     classes_path = tmp_path / "classes.jsonl"
     classes_path.write_text(
-        json.dumps({"dex_index": 0, "class_descriptor": "Lexample/A;"}) + "\\n"
-        + json.dumps({"dex_index": 0, "class_descriptor": "Lexample/B;"}) + "\\n"
-        + json.dumps({"dex_index": 1, "class_descriptor": "Lexample/C;"}) + "\\n",
+        json.dumps({"dex_index": 0, "class_descriptor": "Lexample/A;"}) + chr(10)
+        + json.dumps({"dex_index": 0, "class_descriptor": "Lexample/B;"}) + chr(10)
+        + json.dumps({"dex_index": 1, "class_descriptor": "Lexample/C;"}) + chr(10),
         encoding="utf-8",
     )
     dex_rows = [
