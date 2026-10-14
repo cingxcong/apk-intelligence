@@ -114,3 +114,44 @@ def test_require_androguard_returns_nonzero_when_extraction_fails(tmp_path: Path
 
     assert result == 3
     assert "Androguard was required" in capsys.readouterr().err
+
+
+
+def test_dex_coverage_summary_compares_header_and_parsed_class_counts(tmp_path: Path) -> None:
+    classes_path = tmp_path / "classes.jsonl"
+    classes_path.write_text(
+        json.dumps({"dex_index": 0, "class_descriptor": "Lexample/A;"}) + "\\n"
+        + json.dumps({"dex_index": 0, "class_descriptor": "Lexample/B;"}) + "\\n"
+        + json.dumps({"dex_index": 1, "class_descriptor": "Lexample/C;"}) + "\\n",
+        encoding="utf-8",
+    )
+    dex_rows = [
+        {"path": "classes.dex", "class_defs_size": 2},
+        {"path": "classes2.dex", "class_defs_size": 2},
+    ]
+
+    result = cli._dex_coverage_summary(
+        dex_rows,
+        {"status": "ok", "dex_objects": 2, "classes": 3},
+        classes_path,
+    )
+
+    assert result["dex_count_matches_archive"] is True
+    assert result["per_dex"][0]["class_count_matches_header"] is True
+    assert result["per_dex"][1]["parsed_classes"] == 1
+    assert result["per_dex"][1]["class_count_matches_header"] is False
+    assert result["class_count_mismatch_count"] == 1
+
+
+def test_dex_coverage_summary_handles_unavailable_parser_counts(tmp_path: Path) -> None:
+    classes_path = tmp_path / "classes.jsonl"
+    classes_path.write_text("", encoding="utf-8")
+
+    result = cli._dex_coverage_summary(
+        [{"path": "classes.dex", "class_defs_size": 1}],
+        {"status": "skipped"},
+        classes_path,
+    )
+
+    assert result["dex_count_matches_archive"] is None
+    assert result["per_dex"][0]["class_count_matches_header"] is False
