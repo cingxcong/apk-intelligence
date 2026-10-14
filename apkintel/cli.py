@@ -106,7 +106,7 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
                 for match in pattern.finditer(text):
                     offset = combined_base + match.start()
                     # Only emit matches whose start belongs to this new chunk; overlap catches split matches.
-                    if offset < chunk_start or offset in seen_offsets[rule_id]:
+                    if offset in seen_offsets[rule_id]:
                         continue
                     seen_offsets[rule_id].add(offset)
                     if len(hits[rule_id]) < 100:
