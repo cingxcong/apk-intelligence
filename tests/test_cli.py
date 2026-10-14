@@ -155,3 +155,52 @@ def test_dex_coverage_summary_handles_unavailable_parser_counts(tmp_path: Path) 
 
     assert result["dex_count_matches_archive"] is None
     assert result["per_dex"][0]["class_count_matches_header"] is None
+
+
+
+def test_method_level_evidence_links_api_reference_to_method(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.jsonl"
+    instructions.write_text(
+        json.dumps({
+            "dex_index": 1,
+            "class_descriptor": "Lexample/Loader;",
+            "method_name": "loadPlugin",
+            "method_descriptor": "()V",
+            "opcode": "invoke-virtual",
+            "operands": "Ldalvik/system/DexClassLoader;",
+        }) + "\n"
+        + "not valid json\n",
+        encoding="utf-8",
+    )
+
+    evidence = cli._method_level_evidence(instructions)
+
+    assert len(evidence["dynamic_code_loading"]) == 1
+    item = evidence["dynamic_code_loading"][0]
+    assert item["class_descriptor"] == "Lexample/Loader;"
+    assert item["method_name"] == "loadPlugin"
+    assert item["dex_index"] == 1
+    assert item["evidence_type"] == "androguard_instruction_api_reference"
+
+
+def test_method_level_evidence_is_bounded_and_attached(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.jsonl"
+    rows = [
+        {
+            "dex_index": 0,
+            "class_descriptor": "Lexample/A;",
+            "method_name": f"load{i}",
+            "method_descriptor": "()V",
+            "opcode": "invoke-virtual",
+            "operands": "Ldalvik/system/PathClassLoader;",
+        }
+        for i in range(5)
+    ]
+    instructions.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    findings = [{"id": "dynamic_code_loading", "evidence": []}]
+    cli._attach_method_level_evidence(findings, instructions)
+
+    assert findings[0]["method_evidence_count"] == 5
+    assert len(findings[0]["method_evidence"]) == 5
+    assert findings[0]["method_evidence"][0]["method_name"] == "load0"
