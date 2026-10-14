@@ -333,6 +333,71 @@ def _dex_coverage_summary(dex_rows: list[dict[str, Any]], androguard_status: dic
     }
 
 
+
+_METHOD_EVIDENCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("dynamic_code_loading", re.compile(r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader")),
+    ("reflection", re.compile(r"java/lang/reflect|Class\\.forName|Method\\.invoke")),
+    ("native_code", re.compile(r"System\\.loadLibrary|System\\.load\\(")),
+    ("webview_javascript", re.compile(r"setJavaScriptEnabled|addJavascriptInterface")),
+    ("crypto_api", re.compile(r"Cipher;?\\.getInstance|SecretKeySpec|MessageDigest")),
+    ("network_api", re.compile(r"HttpURLConnection|okhttp3|java/net/Socket|URLConnection")),
+    ("process_execution", re.compile(r"Runtime;?\\.getRuntime|ProcessBuilder")),
+    ("accessibility_api", re.compile(r"AccessibilityService|BIND_ACCESSIBILITY_SERVICE")),
+]
+
+
+def _method_level_evidence(instructions_path: Path, limit_per_rule: int = 100) -> dict[str, list[dict[str, Any]]]:
+    """Link API-pattern indicators to the class and method containing an instruction."""
+    evidence: dict[str, list[dict[str, Any]]] = {rule_id: [] for rule_id, _ in _METHOD_EVIDENCE_PATTERNS}
+    if not instructions_path.is_file():
+        return evidence
+    with instructions_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            searchable = " ".join(str(row.get(key) or "") for key in ("operands", "opcode"))
+            if not searchable.strip():
+                continue
+            for rule_id, pattern in _METHOD_EVIDENCE_PATTERNS:
+                if len(evidence[rule_id]) >= limit_per_rule or not pattern.search(searchable):
+                    continue
+                evidence[rule_id].append({
+                    "dex_index": row.get("dex_index"),
+                    "class_descriptor": row.get("class_descriptor"),
+                    "method_name": row.get("method_name"),
+                    "method_descriptor": row.get("method_descriptor"),
+                    "opcode": row.get("opcode"),
+                    "operands": str(row.get("operands") or "")[:500],
+                    "evidence_type": "androguard_instruction_api_reference",
+                })
+    return evidence
+
+
+def _attach_method_level_evidence(findings: list[dict[str, Any]], instructions_path: Path) -> None:
+    """Attach bounded, method-attributed evidence without treating API use as proof of malice."""
+    for rule_id, rows in _method_level_evidence(instructions_path).items():
+        if not rows:
+            continue
+        finding = next((item for item in findings if item.get("id") == rule_id), None)
+        if finding is None:
+            finding = {
+                "id": rule_id,
+                "severity": "info",
+                "category": "behavioral_indicator",
+                "claim_type": "heuristic_indicator",
+                "message": "An API reference was observed in parsed method instructions.",
+                "evidence": [],
+                "confidence": "low",
+                "limitations": "An API reference does not establish that the code path is reachable or malicious.",
+            }
+            findings.append(finding)
+        finding["method_evidence"] = rows
+        finding["method_evidence_count"] = len(rows)
+
 def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = True, run_androguard: bool = True, max_methods: int | None = 100_000) -> dict[str, Any]:
     apk_path = apk_path.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -465,6 +530,8 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
             "evidence": coverage_warnings[:100],
             "confidence": "high",
         })
+    _attach_method_level_evidence(findings, output_dir / "instructions.jsonl")
+
     tools: list[dict[str, Any]] = []
     if run_optional_tools:
         tools.append(_run_tool("jadx", ["jadx", "-d", str(output_dir / "jadx"), str(apk_path)], log_dir, timeout=900, java_opts="-Xmx3g"))
