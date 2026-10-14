@@ -118,7 +118,8 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     log_dir.mkdir(exist_ok=True)
     if not apk_path.is_file():
         raise FileNotFoundError(f"APK not found: {apk_path}")
-    hashes = file_hashes(apk_path)\n    sample_sha256 = hashes["sha256"]
+    hashes = file_hashes(apk_path)
+    sample_sha256 = hashes["sha256"]
     run_started = datetime.now(timezone.utc).isoformat()
     findings: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
