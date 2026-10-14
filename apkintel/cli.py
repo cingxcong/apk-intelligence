@@ -401,6 +401,10 @@ def _attach_method_level_evidence(findings: list[dict[str, Any]], instructions_p
 def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = True, run_androguard: bool = True, max_methods: int | None = 100_000) -> dict[str, Any]:
     apk_path = apk_path.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Normalize once so subprocess output paths stay rooted in the report directory.
+    # Otherwise a relative --out path combined with cwd=output_dir can create
+    # accidental output_dir/output_dir/jadx and output_dir/output_dir/apktool trees.
+    output_dir = output_dir.resolve()
     log_dir = output_dir / "tool-logs"
     log_dir.mkdir(exist_ok=True)
     if not apk_path.is_file():
