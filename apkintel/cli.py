@@ -336,12 +336,12 @@ def _dex_coverage_summary(dex_rows: list[dict[str, Any]], androguard_status: dic
 
 _METHOD_EVIDENCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("dynamic_code_loading", re.compile(r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader")),
-    ("reflection", re.compile(r"java/lang/reflect|Class\\.forName|Method\\.invoke")),
-    ("native_code", re.compile(r"System\\.loadLibrary|System\\.load\\(")),
+    ("reflection", re.compile(r"java/lang/reflect|Class\.forName|Method\.invoke")),
+    ("native_code", re.compile(r"System\.loadLibrary|System\.load\\(")),
     ("webview_javascript", re.compile(r"setJavaScriptEnabled|addJavascriptInterface")),
-    ("crypto_api", re.compile(r"Cipher;?\\.getInstance|SecretKeySpec|MessageDigest")),
+    ("crypto_api", re.compile(r"Cipher;?\.getInstance|SecretKeySpec|MessageDigest")),
     ("network_api", re.compile(r"HttpURLConnection|okhttp3|java/net/Socket|URLConnection")),
-    ("process_execution", re.compile(r"Runtime;?\\.getRuntime|ProcessBuilder")),
+    ("process_execution", re.compile(r"Runtime;?\.getRuntime|ProcessBuilder")),
     ("accessibility_api", re.compile(r"AccessibilityService|BIND_ACCESSIBILITY_SERVICE")),
 ]
 
