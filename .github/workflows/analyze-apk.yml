@@ -179,5 +179,7 @@ jobs:
           path: |
             analysis-output/**
             !analysis-output/sample.apk
+            !analysis-output/input/sample.apk
+            !analysis-output/**/*.apk
           if-no-files-found: warn
           retention-days: 7
