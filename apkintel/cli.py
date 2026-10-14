@@ -347,33 +347,63 @@ _METHOD_EVIDENCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 
 def _method_level_evidence(instructions_path: Path, limit_per_rule: int = 100) -> dict[str, list[dict[str, Any]]]:
-    """Link API-pattern indicators to the class and method containing an instruction."""
+    """Link API indicators to methods, preserving offsets and aggregating repeats."""
     evidence: dict[str, list[dict[str, Any]]] = {rule_id: [] for rule_id, _ in _METHOD_EVIDENCE_PATTERNS}
-    if not instructions_path.is_file():
+    seen: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {
+        rule_id: {} for rule_id, _ in _METHOD_EVIDENCE_PATTERNS
+    }
+    if not instructions_path.is_file() or limit_per_rule <= 0:
         return evidence
+
     with instructions_path.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(row, dict):
                 continue
             searchable = " ".join(str(row.get(key) or "") for key in ("operands", "opcode"))
             if not searchable.strip():
                 continue
+
             for rule_id, pattern in _METHOD_EVIDENCE_PATTERNS:
-                if len(evidence[rule_id]) >= limit_per_rule or not pattern.search(searchable):
+                if not pattern.search(searchable):
                     continue
-                evidence[rule_id].append({
+                # One record per rule and method: repeated API instructions increase
+                # occurrence metadata instead of flooding the report.
+                key = (
+                    row.get("dex_index"),
+                    row.get("class_descriptor"),
+                    row.get("method_name"),
+                    row.get("method_descriptor"),
+                )
+                existing = seen[rule_id].get(key)
+                offset = row.get("method_code_offset_bytes")
+                if existing is not None:
+                    existing["occurrences"] += 1
+                    offsets = existing["additional_instruction_offsets_bytes"]
+                    if offset is not None and offset != existing.get("method_code_offset_bytes") and offset not in offsets and len(offsets) < 10:
+                        offsets.append(offset)
+                    continue
+                if len(evidence[rule_id]) >= limit_per_rule:
+                    continue
+                item = {
                     "dex_index": row.get("dex_index"),
                     "class_descriptor": row.get("class_descriptor"),
                     "method_name": row.get("method_name"),
                     "method_descriptor": row.get("method_descriptor"),
+                    "method_code_offset_bytes": offset,
+                    "additional_instruction_offsets_bytes": [],
+                    "occurrences": 1,
                     "opcode": row.get("opcode"),
                     "operands": str(row.get("operands") or "")[:500],
                     "evidence_type": "androguard_instruction_api_reference",
-                })
+                }
+                evidence[rule_id].append(item)
+                seen[rule_id][key] = item
     return evidence
 
 
