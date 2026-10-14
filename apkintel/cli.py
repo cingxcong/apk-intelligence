@@ -315,8 +315,8 @@ def _dex_coverage_summary(dex_rows: list[dict[str, Any]], androguard_status: dic
             "path": dex_row["path"],
             "header_class_defs": expected,
             "parsed_classes": parsed,
-            "class_count_comparable": isinstance(expected, int),
-            "class_count_matches_header": parsed == expected if isinstance(expected, int) else None,
+            "class_count_comparable": isinstance(expected, int) and androguard_status.get("status") == "ok",
+            "class_count_matches_header": parsed == expected if isinstance(expected, int) and androguard_status.get("status") == "ok" else None,
         })
     expected_dex_count = len(dex_rows)
     parsed_dex_count = androguard_status.get("dex_objects")
