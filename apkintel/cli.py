@@ -152,13 +152,15 @@ def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, jav
     else:
         env = None
     record["command"] = command
+    stdout_path = log_dir / f"{name}.stdout.txt"
+    stderr_path = log_dir / f"{name}.stderr.txt"
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, cwd=str(log_dir.parent), env=env)
-        (log_dir / f"{name}.stdout.txt").write_text(result.stdout[-2_000_000:], encoding="utf-8", errors="replace")
-        (log_dir / f"{name}.stderr.txt").write_text(result.stderr[-2_000_000:], encoding="utf-8", errors="replace")
+        # Stream tool output to disk rather than retaining potentially huge logs in RAM.
+        with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle, stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_handle:
+            result = subprocess.run(command, stdout=stdout_handle, stderr=stderr_handle, text=True, timeout=timeout, check=False, cwd=str(log_dir.parent), env=env)
         record.update({"status": "ok" if result.returncode == 0 else "error", "exit_code": result.returncode, "stdout_log": f"tool-logs/{name}.stdout.txt", "stderr_log": f"tool-logs/{name}.stderr.txt"})
     except subprocess.TimeoutExpired:
-        record.update({"status": "timeout", "reason": "Tool exceeded configured timeout."})
+        record.update({"status": "timeout", "reason": "Tool exceeded configured timeout.", "stdout_log": f"tool-logs/{name}.stdout.txt", "stderr_log": f"tool-logs/{name}.stderr.txt"})
     except Exception as exc:
         record.update({"status": "error", "error": str(exc)})
     return record
