@@ -84,9 +84,11 @@ def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900) -> 
     return record
 
 
-def _androguard_extract(apk_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+def _androguard_extract(apk_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     classes: list[dict[str, Any]] = []
     methods: list[dict[str, Any]] = []
+    instructions: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
     status: dict[str, Any] = {"available": False, "status": "skipped", "note": "Install a compatible Androguard release to enable structured class/method extraction."}
     try:
         from androguard.misc import AnalyzeAPK  # type: ignore
@@ -102,13 +104,58 @@ def _androguard_extract(apk_path: Path) -> tuple[list[dict[str, Any]], list[dict
                     descriptor = str(cls.get_name())
                     classes.append({"dex_index": dex_index, "class_descriptor": descriptor, "super_descriptor": str(cls.get_superclassname()) if hasattr(cls, "get_superclassname") else None, "source": "androguard", "evidence": {"archive": apk_path.name, "dex_index": dex_index}})
                     for method in cls.get_methods():
-                        methods.append({"dex_index": dex_index, "class_descriptor": descriptor, "name": str(method.get_name()), "descriptor": str(method.get_descriptor()), "access_flags": str(method.get_access_flags_string()) if hasattr(method, "get_access_flags_string") else None, "code_units_or_bytes": None, "source": "androguard"})
+                        method_name = str(method.get_name())
+                        method_descriptor = str(method.get_descriptor())
+                        method_row: dict[str, Any] = {"dex_index": dex_index, "class_descriptor": descriptor, "name": method_name, "descriptor": method_descriptor, "access_flags": str(method.get_access_flags_string()) if hasattr(method, "get_access_flags_string") else None, "source": "androguard"}
+                        try:
+                            code = method.get_code()
+                            method_row["has_code"] = code is not None
+                            if code is not None:
+                                code_bytes = None
+                                try:
+                                    bytecode = code.get_bc()
+                                    if hasattr(bytecode, "get_raw"):
+                                        code_bytes = bytecode.get_raw()
+                                    elif hasattr(bytecode, "get_raw_buff"):
+                                        code_bytes = bytecode.get_raw_buff()
+                                except Exception:
+                                    pass
+                                if isinstance(code_bytes, (bytes, bytearray)):
+                                    method_row["code_bytes"] = len(code_bytes)
+                                    method_row["code_sha256"] = hashlib.sha256(code_bytes).hexdigest()
+                                offset = 0
+                                count = 0
+                                try:
+                                    for ins in method.get_instructions():
+                                        length = int(ins.get_length()) if hasattr(ins, "get_length") else 0
+                                        instructions.append({"dex_index": dex_index, "class_descriptor": descriptor, "method_name": method_name, "method_descriptor": method_descriptor, "method_code_offset_bytes": offset, "opcode": str(ins.get_name()) if hasattr(ins, "get_name") else str(type(ins).__name__), "operands": str(ins.get_output())[:2000] if hasattr(ins, "get_output") else "", "length_bytes": length, "evidence_type": "androguard_instruction"})
+                                        offset += max(length, 0)
+                                        count += 1
+                                except Exception as instruction_exc:
+                                    method_row["instruction_extraction_error"] = f"{type(instruction_exc).__name__}: {instruction_exc}"
+                                method_row["instruction_count"] = count
+                        except Exception as code_exc:
+                            method_row["code_extraction_error"] = f"{type(code_exc).__name__}: {code_exc}"
+                        methods.append(method_row)
+                        try:
+                            method_analysis = analysis.get_method(method)
+                            if method_analysis is not None and hasattr(method_analysis, "get_xref_to"):
+                                for xref in method_analysis.get_xref_to():
+                                    target_class = str(xref[0].get_name()) if len(xref) > 0 and hasattr(xref[0], "get_name") else str(xref[0]) if len(xref) > 0 else None
+                                    target_method_obj = xref[1] if len(xref) > 1 else None
+                                    target_method = None
+                                    if target_method_obj is not None:
+                                        target_method_obj = target_method_obj.get_method() if hasattr(target_method_obj, "get_method") else target_method_obj
+                                        target_method = {"name": str(target_method_obj.get_name()), "descriptor": str(target_method_obj.get_descriptor()), "class_descriptor": str(target_method_obj.get_class_name()) if hasattr(target_method_obj, "get_class_name") else target_class} if hasattr(target_method_obj, "get_name") else str(target_method_obj)
+                                    references.append({"dex_index": dex_index, "source_class": descriptor, "source_method": method_name, "source_descriptor": method_descriptor, "target_class": target_class, "target_method": target_method, "reference_kind": "xref_to", "evidence_type": "androguard_cross_reference"})
+                        except Exception:
+                            pass
             status.update({"status": "ok", "dex_objects": len(dexes), "classes": len(classes), "methods": len(methods)})
         except Exception as exc:
             status.update({"status": "error", "error": f"Androguard parse failed: {type(exc).__name__}: {exc}"})
     except Exception as exc:
         status.update({"status": "unavailable", "error": f"Androguard import failed: {type(exc).__name__}: {exc}"})
-    return classes, methods, status
+    return classes, methods, instructions, references, status
 
 
 def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = True) -> dict[str, Any]:
@@ -194,7 +241,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
         if matches:
             findings.append({"id": rule_id, "severity": "info", "category": "behavioral_indicator", "claim_type": "heuristic_indicator", "message": message, "evidence": matches[:100], "confidence": "low", "limitations": "String/pattern presence alone does not establish that the code path is reachable or used."})
 
-    classes, methods, androguard_status = _androguard_extract(apk_path)
+    classes, methods, instructions, references, androguard_status = _androguard_extract(apk_path)
     tools: list[dict[str, Any]] = []
     if run_optional_tools:
         jadx_out = output_dir / "jadx"
@@ -225,10 +272,12 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     _jsonl(output_dir / "strings.jsonl", string_rows)
     _jsonl(output_dir / "classes.jsonl", classes)
     _jsonl(output_dir / "methods.jsonl", methods)
+    _jsonl(output_dir / "instructions.jsonl", instructions)
+    _jsonl(output_dir / "references.jsonl", references)
     (output_dir / "findings.json").write_text(json.dumps({"schema_version": "1.0", "findings": findings}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     counts = Counter(row["category"] for row in findings)
-    summary = ["# APK Intelligence Report", "", f"- **Sample:** `{apk_path.name}`", f"- **SHA-256:** `{sample_sha256}`", f"- **Size:** {apk_path.stat().st_size:,} bytes", f"- **DEX files:** {len(dex_rows)}", f"- **Archive entries:** {len(files)}", f"- **Extracted printable strings:** {len(string_rows)}", f"- **Parsed classes / methods:** {len(classes)} / {len(methods)}", f"- **Static findings:** {len(findings)}", "", "## Finding categories", ""]
+    summary = ["# APK Intelligence Report", "", f"- **Sample:** `{apk_path.name}`", f"- **SHA-256:** `{sample_sha256}`", f"- **Size:** {apk_path.stat().st_size:,} bytes", f"- **DEX files:** {len(dex_rows)}", f"- **Archive entries:** {len(files)}", f"- **Extracted printable strings:** {len(string_rows)}", f"- **Parsed classes / methods:** {len(classes)} / {len(methods)}", f"- **Instructions / cross-references:** {len(instructions)} / {len(references)}", f"- **Static findings:** {len(findings)}", "", "## Finding categories", ""]
     summary.extend([f"- {key}: {value}" for key, value in sorted(counts.items())] or ["- None"])
     summary.extend(["", "## DEX fingerprints", ""])
     summary.extend([f"- `{row['path']}` — SHA-256 `{row['sha256']}`, {row['bytes']:,} bytes, magic `{row['magic']}`" for row in dex_rows] or ["- No standard DEX entries detected."])
