@@ -154,4 +154,4 @@ def test_dex_coverage_summary_handles_unavailable_parser_counts(tmp_path: Path) 
     )
 
     assert result["dex_count_matches_archive"] is None
-    assert result["per_dex"][0]["class_count_matches_header"] is False
+    assert result["per_dex"][0]["class_count_matches_header"] is None
