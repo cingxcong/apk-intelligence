@@ -12,6 +12,16 @@ on:
         required: true
         default: "250"
         type: string
+      skip_optional_tools:
+        description: Skip JADX, Apktool, and APKiD subprocess analysis
+        required: true
+        default: false
+        type: boolean
+      skip_androguard:
+        description: Skip Androguard class/method extraction
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -24,6 +34,8 @@ jobs:
   analyze:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    env:
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -37,12 +49,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install '.[androguard]' apkid
+
       - name: Install optional reverse-engineering tools
+        if: ${{ !inputs.skip_optional_tools }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends apktool unzip
-          python -m pip install --upgrade pip
-          python -m pip install '.[androguard]' apkid
           python - <<'PY'
           import json
           import os
@@ -89,8 +105,17 @@ jobs:
         env:
           APK_URL: ${{ inputs.apk_url }}
           MAX_MB: ${{ inputs.max_download_mb }}
+          SKIP_OPTIONAL_TOOLS: ${{ inputs.skip_optional_tools }}
+          SKIP_ANDROGUARD: ${{ inputs.skip_androguard }}
         run: |
-          python -m apkintel analyze-url "$APK_URL" --max-bytes "$((MAX_MB * 1024 * 1024))" --out analysis-output
+          args=(analyze-url "$APK_URL" --max-bytes "$((MAX_MB * 1024 * 1024))" --out analysis-output)
+          if [ "$SKIP_OPTIONAL_TOOLS" = "true" ]; then
+            args+=(--no-optional-tools)
+          fi
+          if [ "$SKIP_ANDROGUARD" = "true" ]; then
+            args+=(--no-androguard)
+          fi
+          python -m apkintel "${args[@]}"
       - name: Package analysis bundle
         if: always()
         run: |
