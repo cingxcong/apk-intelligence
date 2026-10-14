@@ -25,7 +25,7 @@ TEXT_EXTENSIONS = (".xml", ".txt", ".json", ".properties", ".yml", ".yaml", ".ht
 SUSPICIOUS_PATTERNS = [
     ("dynamic_code_loading", re.compile(r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader"), "Dynamic code-loading API reference found."),
     ("reflection", re.compile(r"java/lang/reflect|Class\.forName|Method\.invoke"), "Reflection API reference found."),
-    ("native_code", re.compile(r"System\.loadLibrary|System\.load\\("), "Native library loading API reference found."),
+    ("native_code", re.compile(r"System\.loadLibrary|System\.load\("), "Native library loading API reference found."),
     ("webview_javascript", re.compile(r"setJavaScriptEnabled|addJavascriptInterface"), "WebView JavaScript configuration/interface reference found."),
     ("crypto_api", re.compile(r"Cipher\.getInstance|SecretKeySpec|MessageDigest"), "Cryptographic API reference found; this is not proof of weak cryptography."),
     ("network_api", re.compile(r"HttpURLConnection|okhttp3|java/net/Socket|URLConnection"), "Network API/library reference found; no network behavior was executed."),
