@@ -291,6 +291,48 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
     return status
 
 
+
+def _dex_coverage_summary(dex_rows: list[dict[str, Any]], androguard_status: dict[str, Any], classes_path: Path) -> dict[str, Any]:
+    """Compare raw DEX header class counts with the classes actually emitted by Androguard."""
+    parsed_by_dex: Counter[int] = Counter()
+    if classes_path.is_file():
+        with classes_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    parsed_by_dex[int(row["dex_index"])] += 1
+                except (ValueError, KeyError, TypeError):
+                    continue
+
+    dex_details = []
+    for dex_index, dex_row in enumerate(dex_rows):
+        expected = dex_row.get("class_defs_size")
+        parsed = parsed_by_dex.get(dex_index, 0)
+        dex_details.append({
+            "dex_index": dex_index,
+            "path": dex_row["path"],
+            "header_class_defs": expected,
+            "parsed_classes": parsed,
+            "class_count_comparable": isinstance(expected, int),
+            "class_count_matches_header": parsed == expected if isinstance(expected, int) else None,
+        })
+    expected_dex_count = len(dex_rows)
+    parsed_dex_count = androguard_status.get("dex_objects")
+    dex_count_matches = parsed_dex_count == expected_dex_count if isinstance(parsed_dex_count, int) else None
+    class_mismatches = [item for item in dex_details if item["class_count_matches_header"] is False]
+    return {
+        "archive_dex_count": expected_dex_count,
+        "androguard_dex_count": parsed_dex_count,
+        "dex_count_matches_archive": dex_count_matches,
+        "per_dex": dex_details,
+        "class_count_mismatch_count": len(class_mismatches),
+        "class_counts_match_headers": all(item["class_count_matches_header"] is not False for item in dex_details),
+        "limitations": "DEX header counts are a comparison baseline, not proof that every class is semantically valid or fully analyzed.",
+    }
+
+
 def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = True, run_androguard: bool = True, max_methods: int | None = 100_000) -> dict[str, Any]:
     apk_path = apk_path.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -394,6 +436,35 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
         androguard_status = {"available": False, "status": "disabled", "note": "Androguard extraction disabled by --no-androguard.", "max_methods": max_methods, "truncated": False}
         for filename in ("classes.jsonl", "methods.jsonl", "instructions.jsonl", "references.jsonl"):
             (output_dir / filename).write_text("", encoding="utf-8")
+    dex_coverage = _dex_coverage_summary(dex_rows, androguard_status, output_dir / "classes.jsonl")
+    coverage_warnings = []
+    if dex_coverage["dex_count_matches_archive"] is False:
+        coverage_warnings.append({
+            "kind": "dex_count_mismatch",
+            "archive_dex_count": dex_coverage["archive_dex_count"],
+            "androguard_dex_count": dex_coverage["androguard_dex_count"],
+        })
+    for dex_item in dex_coverage["per_dex"]:
+        if dex_item["class_count_matches_header"] is False:
+            coverage_warnings.append({"kind": "class_count_mismatch", **dex_item})
+    if androguard_status.get("truncated"):
+        coverage_warnings.append({
+            "kind": "method_instruction_output_truncated",
+            "max_methods": max_methods,
+            "classes_complete": True,
+            "methods_emitted": androguard_status.get("methods", 0),
+            "note": androguard_status.get("note"),
+        })
+    if coverage_warnings:
+        findings.append({
+            "id": "dex_inventory_coverage_mismatch",
+            "severity": "warning",
+            "category": "coverage",
+            "claim_type": "observed_fact",
+            "message": "DEX header counts and/or parser output indicate incomplete or capped structured coverage; inspect manifest.json coverage details.",
+            "evidence": coverage_warnings[:100],
+            "confidence": "high",
+        })
     tools: list[dict[str, Any]] = []
     if run_optional_tools:
         tools.append(_run_tool("jadx", ["jadx", "-d", str(output_dir / "jadx"), str(apk_path)], log_dir, timeout=900, java_opts="-Xmx3g"))
@@ -406,7 +477,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     except importlib.metadata.PackageNotFoundError:
         pass
     tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
-    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
+    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "dex_inventory": dex_coverage, "coverage_warnings": coverage_warnings, "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
 
     _jsonl(output_dir / "files.jsonl", files)
     _jsonl(output_dir / "dex.jsonl", dex_rows)
