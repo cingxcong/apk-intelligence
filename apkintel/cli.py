@@ -412,6 +412,8 @@ def _method_level_evidence(instructions_path: Path, limit_per_rule: int = 100) -
                     continue
                 if len(evidence[rule_id]) >= limit_per_rule:
                     continue
+                operands = str(row.get("operands") or "")
+                target = _parse_method_reference(operands)
                 item = {
                     "dex_index": row.get("dex_index"),
                     "class_descriptor": row.get("class_descriptor"),
@@ -421,9 +423,14 @@ def _method_level_evidence(instructions_path: Path, limit_per_rule: int = 100) -
                     "additional_instruction_offsets_bytes": [],
                     "occurrences": 1,
                     "opcode": row.get("opcode"),
-                    "operands": str(row.get("operands") or "")[:500],
+                    "operands": operands[:500],
                     "evidence_type": "androguard_instruction_api_reference",
                 }
+                if target is not None:
+                    item["target_class_descriptor"] = target["target_class_descriptor"]
+                    item["target_method_name"] = target["target_method_name"]
+                    item["target_method_descriptor"] = target["target_method_descriptor"]
+                    item["target_resolution"] = "symbolic_target_only"
                 evidence[rule_id].append(item)
                 seen[rule_id][key] = item
     return evidence
