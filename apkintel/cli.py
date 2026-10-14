@@ -387,6 +387,14 @@ def _method_level_evidence(instructions_path: Path, limit_per_rule: int = 100) -
                 continue
             if not isinstance(row, dict):
                 continue
+            # Method evidence must be traceable to a concrete DEX method. Without
+            # this identity, unrelated malformed/legacy rows would share one
+            # all-None deduplication key.
+            if any(
+                row.get(key) is None or not str(row.get(key)).strip()
+                for key in ("dex_index", "class_descriptor", "method_name", "method_descriptor")
+            ):
+                continue
             searchable = " ".join(str(row.get(key) or "") for key in ("operands", "opcode"))
             if not searchable.strip():
                 continue
