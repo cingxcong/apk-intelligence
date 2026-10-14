@@ -76,7 +76,7 @@ class _JsonlWriter:
         self.handle.close()
 
 
-def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings: bool) -> dict[str, Any]:
+def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings: bool, max_strings: int = MAX_STRING_ROWS) -> dict[str, Any]:
     """Hash and scan ZIP members incrementally, retaining overlap for boundary matches."""
     digest = hashlib.sha256()
     prefix = bytearray()
@@ -88,6 +88,7 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
     carry = bytearray()
     carry_start = 0
     total = 0
+    strings_truncated = False
     overlap_size = max(SCAN_OVERLAP_BYTES, max(len(p.pattern) for _, p, _ in SUSPICIOUS_PATTERNS) * 2)
     with archive.open(info, "r") as member:
         while True:
@@ -120,14 +121,20 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
                         if len(carry) < 2000:
                             carry.append(byte)
                     else:
-                        if len(carry) >= 5 and len(strings) < MAX_STRING_ROWS:
-                            strings.append({"value": carry.decode("ascii", errors="ignore"), "source_file": info.filename, "offset_text_chars_approx": carry_start, "evidence_type": "printable_ascii_sequence", "confidence": "low" if info.filename.endswith((".dex", ".so")) else "medium"})
+                        if len(carry) >= 5:
+                            if len(strings) < max_strings:
+                                strings.append({"value": carry.decode("ascii", errors="ignore"), "source_file": info.filename, "offset_text_chars_approx": carry_start, "evidence_type": "printable_ascii_sequence", "confidence": "low" if info.filename.endswith((".dex", ".so")) else "medium"})
+                            else:
+                                strings_truncated = True
                         carry.clear()
             overlap = combined[-overlap_size:]
             absolute_base += len(chunk)
-    if collect_strings and len(carry) >= 5 and len(strings) < MAX_STRING_ROWS:
-        strings.append({"value": carry.decode("ascii", errors="ignore"), "source_file": info.filename, "offset_text_chars_approx": carry_start, "evidence_type": "printable_ascii_sequence", "confidence": "low" if info.filename.endswith((".dex", ".so")) else "medium"})
-    return {"sha256": digest.hexdigest(), "bytes_read": total, "prefix": bytes(prefix), "strings": strings, "pattern_hits": hits}
+    if collect_strings and len(carry) >= 5:
+        if len(strings) < max_strings:
+            strings.append({"value": carry.decode("ascii", errors="ignore"), "source_file": info.filename, "offset_text_chars_approx": carry_start, "evidence_type": "printable_ascii_sequence", "confidence": "low" if info.filename.endswith((".dex", ".so")) else "medium"})
+        else:
+            strings_truncated = True
+    return {"sha256": digest.hexdigest(), "bytes_read": total, "prefix": bytes(prefix), "strings": strings, "strings_truncated": strings_truncated, "pattern_hits": hits}
 
 
 def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, java_opts: str | None = None) -> dict[str, Any]:
@@ -284,7 +291,8 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
                 if not info.is_dir():
                     try:
                         scan_strings = name.endswith(TEXT_EXTENSIONS) or name.endswith(".dex") or name.endswith(".so")
-                        scanned = _scan_entry(archive, info, scan_strings)
+                        remaining_strings = max(0, MAX_STRING_ROWS - len(string_rows))
+                        scanned = _scan_entry(archive, info, scan_strings, max_strings=remaining_strings)
                         row["sha256"] = scanned["sha256"]
                         row["bytes_read"] = scanned["bytes_read"]
                         if scanned["bytes_read"] != info.file_size:
@@ -293,9 +301,8 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
                             seen = {item["offset_text_chars_approx"] for item in pattern_hits[rule_id] if item["file"] == name}
                             pattern_hits[rule_id].extend(item for item in rows if item["offset_text_chars_approx"] not in seen and len(pattern_hits[rule_id]) < 100)
                         if scan_strings:
-                            remaining = max(0, MAX_STRING_ROWS - len(string_rows))
-                            string_rows.extend(scanned["strings"][:remaining])
-                            if len(scanned["strings"]) > remaining or len(string_rows) >= MAX_STRING_ROWS:
+                            string_rows.extend(scanned["strings"])
+                            if scanned["strings_truncated"] or len(string_rows) >= MAX_STRING_ROWS:
                                 if not strings_truncated:
                                     skipped_or_truncated.append({"file": name, "reason": "printable_string_output_limit", "limit": MAX_STRING_ROWS})
                                 strings_truncated = True
