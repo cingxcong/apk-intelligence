@@ -136,33 +136,39 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
             if collect_strings:
                 # Regex runs in optimized bytecode rather than iterating in Python over every byte.
                 # Keep only the start of a long run across chunks; emitted string values are capped at 2,000 bytes.
-                matches = list(_PRINTABLE_RUN_RE.finditer(chunk))
-                first_to_process = 0
+                match_iter = iter(_PRINTABLE_RUN_RE.finditer(chunk))
+                first_match = next(match_iter, None)
+                skip_first = False
                 if carry:
-                    if matches and matches[0].start() == 0:
-                        leading = matches[0]
+                    if first_match is not None and first_match.start() == 0:
+                        leading = first_match
                         room = max(0, 2000 - len(carry))
                         if room:
                             carry.extend(chunk[:min(leading.end(), room)])
-                        if leading.end() == len(chunk):
-                            # The same printable run continues into the next chunk.
-                            first_to_process = 1
-                        else:
+                        # If the run reaches chunk end, retain it for the next chunk.
+                        # Otherwise it has ended and the saved prefix can be emitted.
+                        if leading.end() < len(chunk):
                             emit_string(bytes(carry), carry_start)
                             carry.clear()
-                            first_to_process = 1
+                        skip_first = True
                     else:
                         # The previous chunk's trailing run ended at this chunk boundary.
                         emit_string(bytes(carry), carry_start)
                         carry.clear()
 
-                for match in matches[first_to_process:]:
+                def process_match(match: re.Match[bytes]) -> None:
+                    nonlocal carry_start, carry
                     run = match.group()
                     if match.end() == len(chunk):
                         carry_start = chunk_start + match.start()
                         carry = bytearray(run[:2000])
                     elif len(run) >= 5:
                         emit_string(run[:2000], chunk_start + match.start())
+
+                if first_match is not None and not skip_first:
+                    process_match(first_match)
+                for match in match_iter:
+                    process_match(match)
 
             overlap = combined[-overlap_size:]
             if total >= next_progress:
