@@ -65,9 +65,10 @@ jobs:
               output.write(response.read())
           with zipfile.ZipFile(archive) as zf:
               zf.extractall(target)
-          bins = list(target.glob("*/bin/jadx"))
+          bins = [p for p in target.rglob("jadx") if p.is_file() and p.parent.name == "bin"]
           if not bins:
-              raise SystemExit("JADX ZIP did not contain the expected bin/jadx executable")
+              sample = [str(p.relative_to(target)) for p in target.rglob("*") if p.is_file()][:30]
+              raise SystemExit("Could not locate JADX CLI under a bin/ directory. Extracted files: " + ", ".join(sample))
           bin_dir = bins[0].parent
           os.chmod(bins[0], 0o755)
           with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path_file:
