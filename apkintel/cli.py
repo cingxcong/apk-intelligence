@@ -34,12 +34,17 @@ SUSPICIOUS_PATTERNS = [
 ]
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
+def file_hashes(path: Path) -> dict[str, str]:
+    digests = {name: hashlib.new(name) for name in ("sha256", "sha1", "md5")}
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+            for digest in digests.values():
+                digest.update(chunk)
+    return {name: digest.hexdigest() for name, digest in digests.items()}
+
+
+def sha256_file(path: Path) -> str:
+    return file_hashes(path)["sha256"]
 
 
 def tool_version(command: str, args: list[str] | None = None) -> dict[str, Any]:
@@ -109,7 +114,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     log_dir.mkdir(exist_ok=True)
     if not apk_path.is_file():
         raise FileNotFoundError(f"APK not found: {apk_path}")
-    sample_sha256 = sha256_file(apk_path)
+    hashes = file_hashes(apk_path)\n    sample_sha256 = hashes["sha256"]
     run_started = datetime.now(timezone.utc).isoformat()
     findings: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
@@ -152,7 +157,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
                             for match in re.finditer(r"[\x20-\x7e]{5,}", decoded):
                                 value = match.group(0).strip()
                                 if value:
-                                    string_rows.append({"value": value[:2000], "source_file": name, "offset_bytes_approx": match.start(), "evidence_type": "printable_ascii_sequence", "confidence": "low" if name.endswith(".dex") or name.endswith(".so") else "medium"})
+                                    string_rows.append({"value": value[:2000], "source_file": name, "offset_text_chars_approx": match.start(), "evidence_type": "printable_ascii_sequence", "confidence": "low" if name.endswith(".dex") or name.endswith(".so") else "medium"})
                     except Exception as exc:
                         row["read_error"] = f"{type(exc).__name__}: {exc}"
                 files.append(row)
@@ -180,7 +185,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
         matches = []
         for source_name, source_text in text_blobs:
             for match in list(pattern.finditer(source_text))[:25]:
-                matches.append({"file": source_name, "match": match.group(0)[:200], "offset_bytes_approx": match.start()})
+                matches.append({"file": source_name, "match": match.group(0)[:200], "offset_text_chars_approx": match.start()})
         if matches:
             findings.append({"id": rule_id, "severity": "info", "category": "behavioral_indicator", "claim_type": "heuristic_indicator", "message": message, "evidence": matches[:100], "confidence": "low", "limitations": "String/pattern presence alone does not establish that the code path is reachable or used."})
 
@@ -208,7 +213,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     except importlib.metadata.PackageNotFoundError:
         pass
     tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
-    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashlib.sha1(apk_path.read_bytes()).hexdigest(), "md5": hashlib.md5(apk_path.read_bytes()).hexdigest()}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate offsets in decoded byte stream, not instruction addresses", "notes": ["Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."]}}
+    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate character offsets in decoded text, not byte or instruction addresses", "notes": ["Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."]}}
 
     _jsonl(output_dir / "files.jsonl", files)
     _jsonl(output_dir / "dex.jsonl", dex_rows)
