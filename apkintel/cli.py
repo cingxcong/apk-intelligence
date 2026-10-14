@@ -221,7 +221,6 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
             pass
         try:
             from androguard.core.apk import APK  # type: ignore
-            from androguard.core.analysis.analysis import Analysis  # type: ignore
             from androguard.core.dex import DEX  # type: ignore
             status["available"] = True
             print("[apkintel] Androguard parsing started; using DEX inventory mode (cross-reference graph disabled for performance).", file=sys.stderr, flush=True)
@@ -230,12 +229,10 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
             # Materialize it once so progress reporting can safely use len().
             dex_payloads = list(apk_obj.get_all_dex())
             dexes = []
-            analysis = Analysis()
             for dex_index, dex_payload in enumerate(dex_payloads):
                 print(f"[apkintel] Androguard: parsing DEX {dex_index + 1}/{len(dex_payloads)} ({len(dex_payload):,} bytes).", file=sys.stderr, flush=True)
                 dex = DEX(dex_payload)
                 dexes.append(dex)
-                analysis.add(dex)
             print(f"[apkintel] Androguard: DEX parsing complete ({len(dexes)} DEX file(s)); extracting classes and methods.", file=sys.stderr, flush=True)
             status["cross_references"] = "disabled_for_performance"
             try:
@@ -280,26 +277,9 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
                         except Exception as exc:
                             row["code_extraction_error"] = f"{type(exc).__name__}: {exc}"
                         writers["methods"].write(row)
-                        try:
-                            ma = analysis.get_method(method)
-                            if ma is not None and hasattr(ma, "get_xref_to"):
-                                for xref in ma.get_xref_to():
-                                    target_class = str(xref[0].get_name()) if len(xref) and hasattr(xref[0], "get_name") else str(xref[0]) if len(xref) else None
-                                    target_obj = xref[1] if len(xref) > 1 else None
-                                    target_method = None
-                                    if target_obj is not None:
-                                        target_obj = target_obj.get_method() if hasattr(target_obj, "get_method") else target_obj
-                                        target_method = {"name": str(target_obj.get_name()), "descriptor": str(target_obj.get_descriptor()), "class_descriptor": str(target_obj.get_class_name()) if hasattr(target_obj, "get_class_name") else target_class} if hasattr(target_obj, "get_name") else str(target_obj)
-                                    writers["references"].write({"dex_index": dex_index, "source_class": descriptor, "source_method": method_name, "source_descriptor": method_descriptor, "target_class": target_class, "target_method": target_method, "reference_kind": "xref_to", "evidence_type": "androguard_cross_reference"})
-                        except Exception:
-                            pass
-                    if truncated:
-                        break
-                if truncated:
-                    break
-            status.update({"status": "ok", "dex_objects": len(dexes), "classes": writers["classes"].count, "methods": writers["methods"].count, "instructions": writers["instructions"].count, "references": writers["references"].count, "truncated": truncated})
+            status.update({"status": "ok", "dex_objects": len(dexes), "classes": writers["classes"].count, "methods": writers["methods"].count, "instructions": writers["instructions"].count, "references": writers["references"].count, "truncated": truncated, "cross_references": "disabled_for_performance"})
             if truncated:
-                status["note"] = f"Method output truncated at --max-methods={max_methods}; remaining methods, instructions and references were not emitted."
+                status["note"] = f"Class inventory completed; method and instruction output truncated at --max-methods={max_methods}. Remaining methods and instructions were not emitted."
         except Exception as exc:
             status.update({"status": "error", "error": f"Androguard parse failed: {type(exc).__name__}: {exc}"})
     except Exception as exc:
@@ -453,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--no-optional-tools", action="store_true", help="Skip JADX/Apktool/APKiD subprocesses.")
     analyze.add_argument("--no-androguard", action="store_true", help="Skip Androguard parsing.")
     analyze.add_argument("--max-methods", type=int, default=100_000, help="Maximum methods to emit from Androguard (0 means unlimited).")
+    analyze.add_argument("--require-androguard", action="store_true", help="Return a nonzero exit code unless Androguard extraction succeeds.")
     fetch = sub.add_parser("analyze-url", help="Safely download an HTTPS APK URL and analyze it.")
     fetch.add_argument("url")
     fetch.add_argument("--out", type=Path, default=Path("analysis-output"))
@@ -460,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     fetch.add_argument("--no-optional-tools", action="store_true")
     fetch.add_argument("--no-androguard", action="store_true")
     fetch.add_argument("--max-methods", type=int, default=100_000)
+    fetch.add_argument("--require-androguard", action="store_true", help="Return a nonzero exit code unless Androguard extraction succeeds.")
     args = parser.parse_args(argv)
     try:
         if args.max_methods < 0:
@@ -473,6 +455,9 @@ def main(argv: list[str] | None = None) -> int:
             apk_path = args.apk
         manifest = analyze_apk(apk_path, args.out, run_optional_tools=not args.no_optional_tools, run_androguard=not args.no_androguard, max_methods=max_methods)
         print(json.dumps({"status": "ok", "output_dir": str(args.out.resolve()), "sha256": manifest["sample"]["sha256"], "dex_count": manifest["archive"]["dex_count"], "report": str((args.out / "summary.md").resolve())}, indent=2))
+        if args.require_androguard and manifest.get("androguard_extraction", {}).get("status") != "ok":
+            print("apkintel: Androguard was required but extraction did not succeed; see manifest.json.", file=sys.stderr)
+            return 3
         return 0
     except Exception as exc:
         print(f"apkintel: {type(exc).__name__}: {exc}", file=sys.stderr)
