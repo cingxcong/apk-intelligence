@@ -226,7 +226,7 @@ def test_optional_tool_outputs_use_report_root_for_relative_output_dir(tmp_path:
     report_root = (tmp_path / "analysis-output").resolve()
     assert all(log_dir == report_root / "tool-logs" for _, _, log_dir in calls)
     assert calls[0][1][2] == str(report_root / "jadx")
-    assert calls[1][1][-1] == str(apk.resolve())
+    assert calls[1][1][3] == str(apk.resolve())
     assert calls[1][1][5] == str(report_root / "apktool")
     assert (report_root / "manifest.json").is_file()
     assert not (report_root / "analysis-output").exists()
