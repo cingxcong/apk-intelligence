@@ -62,8 +62,10 @@ class AnalyzerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "sample.apk"
-            with patch.object(downloader, "_validate_url", return_value="https://example.com/sample.apk"), \\
-                 patch.object(downloader.urllib.request, "build_opener", return_value=FakeOpener()):
+            with (
+                patch.object(downloader, "_validate_url", return_value="https://example.com/sample.apk"),
+                patch.object(downloader.urllib.request, "build_opener", return_value=FakeOpener()),
+            ):
                 with self.assertRaisesRegex(ValueError, "Incomplete download"):
                     downloader.download_apk("https://example.com/sample.apk", destination)
             self.assertFalse(destination.exists())
