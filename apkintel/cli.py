@@ -140,7 +140,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
                         raw = archive.read(info)
                         digest.update(raw)
                         row["sha256"] = digest.hexdigest()
-                        if name.endswith(".dex") and (name == "classes.dex" or re.fullmatch(r"classes\\d+\.dex", name)):
+                        if name.endswith(".dex") and (name == "classes.dex" or re.fullmatch(r"classes\d+\.dex", name)):
                             dex_rows.append({"path": name, "sha256": row["sha256"], "bytes": len(raw), "magic": raw[:8].decode("ascii", errors="replace"), "header_checksum_adler32": raw[8:12].hex() if len(raw) >= 12 else None, "header_signature_sha1": raw[12:32].hex() if len(raw) >= 32 else None, "file_size_header": int.from_bytes(raw[32:36], "little") if len(raw) >= 36 else None, "header_size": int.from_bytes(raw[36:40], "little") if len(raw) >= 40 else None, "endian_tag": raw[40:44].hex() if len(raw) >= 44 else None, "source": "raw_dex_header", "evidence": {"file": name, "byte_ranges": {"magic": "0x00-0x07", "checksum": "0x08-0x0b", "signature": "0x0c-0x1f", "file_size": "0x20-0x23"}}})
                         if name.endswith(".so") and "/" in name:
                             archive_summary["native_libraries"].append({"path": name, "sha256": row["sha256"], "bytes": len(raw), "elf_magic": raw[:4] == b"\x7fELF"})
