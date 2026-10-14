@@ -1,10 +1,12 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
 from apkintel.cli import analyze_apk
+from apkintel import downloader
 from apkintel.downloader import _validate_url
 
 
@@ -38,6 +40,34 @@ class AnalyzerTests(unittest.TestCase):
     def test_url_rejects_localhost(self):
         with self.assertRaises(ValueError):
             _validate_url('https://localhost/app.apk')
+
+    def test_incomplete_download_is_rejected_and_partial_file_removed(self):
+        class FakeResponse:
+            headers = {"Content-Length": "100"}
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def geturl(self):
+                return "https://example.com/sample.apk"
+            def read(self, size=-1):
+                if not hasattr(self, "sent"):
+                    self.sent = True
+                    return b"PK\\x03\\x04" + b"x" * 12
+                return b""
+
+        class FakeOpener:
+            def open(self, request, timeout=30):
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "sample.apk"
+            with patch.object(downloader, "_validate_url", return_value="https://example.com/sample.apk"), \\
+                 patch.object(downloader.urllib.request, "build_opener", return_value=FakeOpener()):
+                with self.assertRaisesRegex(ValueError, "Incomplete download"):
+                    downloader.download_apk("https://example.com/sample.apk", destination)
+            self.assertFalse(destination.exists())
+            self.assertFalse(destination.with_suffix(".apk.part").exists())
 
 
 if __name__ == '__main__':
