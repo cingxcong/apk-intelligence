@@ -24,12 +24,12 @@ MAX_EXPANDED_BYTES = 1_500_000_000
 TEXT_EXTENSIONS = (".xml", ".txt", ".json", ".properties", ".yml", ".yaml", ".html", ".js", ".smali", ".mf", ".cfg", ".ini")
 SUSPICIOUS_PATTERNS = [
     ("dynamic_code_loading", re.compile(r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader"), "Dynamic code-loading API reference found."),
-    ("reflection", re.compile(r"java/lang/reflect|Class\\.forName|Method\\.invoke"), "Reflection API reference found."),
-    ("native_code", re.compile(r"System\\.loadLibrary|System\\.load\\("), "Native library loading API reference found."),
+    ("reflection", re.compile(r"java/lang/reflect|Class\.forName|Method\.invoke"), "Reflection API reference found."),
+    ("native_code", re.compile(r"System\.loadLibrary|System\.load\\("), "Native library loading API reference found."),
     ("webview_javascript", re.compile(r"setJavaScriptEnabled|addJavascriptInterface"), "WebView JavaScript configuration/interface reference found."),
-    ("crypto_api", re.compile(r"Cipher\\.getInstance|SecretKeySpec|MessageDigest"), "Cryptographic API reference found; this is not proof of weak cryptography."),
+    ("crypto_api", re.compile(r"Cipher\.getInstance|SecretKeySpec|MessageDigest"), "Cryptographic API reference found; this is not proof of weak cryptography."),
     ("network_api", re.compile(r"HttpURLConnection|okhttp3|java/net/Socket|URLConnection"), "Network API/library reference found; no network behavior was executed."),
-    ("process_execution", re.compile(r"Runtime\\.getRuntime|ProcessBuilder"), "Process execution API reference found."),
+    ("process_execution", re.compile(r"Runtime\.getRuntime|ProcessBuilder"), "Process execution API reference found."),
     ("accessibility_api", re.compile(r"AccessibilityService|BIND_ACCESSIBILITY_SERVICE"), "Accessibility service reference found."),
 ]
 
@@ -91,7 +91,7 @@ def _androguard_extract(apk_path: Path) -> tuple[list[dict[str, Any]], list[dict
             for dex_index, dex in enumerate(dexes):
                 for cls in dex.get_classes():
                     descriptor = str(cls.get_name())
-                    classes.append({"dex_index": dex_index, "class_descriptor": descriptor, "super_descriptor": str(cls.get superclass()) if False else str(cls.get_superclassname()) if hasattr(cls, "get_superclassname") else None, "source": "androguard", "evidence": {"archive": apk_path.name, "dex_index": dex_index}})
+                    classes.append({"dex_index": dex_index, "class_descriptor": descriptor, "super_descriptor": str(cls.get_superclassname()) if hasattr(cls, "get_superclassname") else None, "source": "androguard", "evidence": {"archive": apk_path.name, "dex_index": dex_index}})
                     for method in cls.get_methods():
                         methods.append({"dex_index": dex_index, "class_descriptor": descriptor, "name": str(method.get_name()), "descriptor": str(method.get_descriptor()), "access_flags": str(method.get_access_flags_string()) if hasattr(method, "get_access_flags_string") else None, "code_units_or_bytes": None, "source": "androguard"})
             status.update({"status": "ok", "dex_objects": len(dexes), "classes": len(classes), "methods": len(methods)})
@@ -140,16 +140,16 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
                         raw = archive.read(info)
                         digest.update(raw)
                         row["sha256"] = digest.hexdigest()
-                        if name.endswith(".dex") and (name == "classes.dex" or re.fullmatch(r"classes\\d+\\.dex", name)):
+                        if name.endswith(".dex") and (name == "classes.dex" or re.fullmatch(r"classes\\d+\.dex", name)):
                             dex_rows.append({"path": name, "sha256": row["sha256"], "bytes": len(raw), "magic": raw[:8].decode("ascii", errors="replace"), "header_checksum_adler32": raw[8:12].hex() if len(raw) >= 12 else None, "header_signature_sha1": raw[12:32].hex() if len(raw) >= 32 else None, "file_size_header": int.from_bytes(raw[32:36], "little") if len(raw) >= 36 else None, "header_size": int.from_bytes(raw[36:40], "little") if len(raw) >= 40 else None, "endian_tag": raw[40:44].hex() if len(raw) >= 44 else None, "source": "raw_dex_header", "evidence": {"file": name, "byte_ranges": {"magic": "0x00-0x07", "checksum": "0x08-0x0b", "signature": "0x0c-0x1f", "file_size": "0x20-0x23"}}})
                         if name.endswith(".so") and "/" in name:
-                            archive_summary["native_libraries"].append({"path": name, "sha256": row["sha256"], "bytes": len(raw), "elf_magic": raw[:4] == b"\\x7fELF"})
+                            archive_summary["native_libraries"].append({"path": name, "sha256": row["sha256"], "bytes": len(raw), "elf_magic": raw[:4] == b"\x7fELF"})
                         if name.startswith("res/") or name.startswith("assets/"):
                             archive_summary["resource_count"] += 1
                         if len(raw) <= 2_000_000 and (name.endswith(TEXT_EXTENSIONS) or name.endswith(".dex") or name.endswith(".so")):
                             decoded = raw.decode("utf-8", errors="ignore")
                             text_blobs.append((name, decoded))
-                            for match in re.finditer(r"[\\x20-\\x7e]{5,}", decoded):
+                            for match in re.finditer(r"[\x20-\x7e]{5,}", decoded):
                                 value = match.group(0).strip()
                                 if value:
                                     string_rows.append({"value": value[:2000], "source_file": name, "offset_bytes_approx": match.start(), "evidence_type": "printable_ascii_sequence", "confidence": "low" if name.endswith(".dex") or name.endswith(".so") else "medium"})
@@ -158,6 +158,8 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
                 files.append(row)
     except zipfile.BadZipFile as exc:
         raise ValueError("Input is not a readable APK/ZIP archive.") from exc
+
+    archive_summary["dex_count"] = len(dex_rows)
 
     # Keep duplicate strings out of the report while preserving the first source occurrence.
     unique_strings: dict[tuple[str, str], dict[str, Any]] = {}
