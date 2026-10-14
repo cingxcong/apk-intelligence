@@ -261,3 +261,29 @@ def test_optional_tool_outputs_use_report_root_for_relative_output_dir(tmp_path:
     assert calls[1][1][5] == str(report_root / "apktool")
     assert (report_root / "manifest.json").is_file()
     assert not (report_root / "analysis-output").exists()
+
+
+def test_optional_tool_failure_is_reported_as_coverage_warning(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "sample.apk"
+    _make_apk(apk, {"AndroidManifest.xml": b"<manifest/>"})
+    output = tmp_path / "out"
+
+    def fake_run_tool(name, argv, log_dir, **kwargs):
+        if name == "jadx":
+            return {
+                "tool": name,
+                "status": "error",
+                "exit_code": 3,
+                "stderr_log": "tool-logs/jadx.stderr.txt",
+            }
+        return {"tool": name, "status": "ok"}
+
+    monkeypatch.setattr(cli, "_run_tool", fake_run_tool)
+    cli.analyze_apk(apk, output, run_optional_tools=True, run_androguard=False)
+
+    findings = _findings(output)
+    failure = next(item for item in findings if item["id"] == "optional_tool_failures")
+    assert failure["severity"] == "warning"
+    assert failure["category"] == "coverage"
+    assert failure["evidence"][0]["tool"] == "jadx"
+    assert failure["evidence"][0]["exit_code"] == 3
