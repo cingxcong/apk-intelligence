@@ -106,12 +106,13 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
             for rule_id, pattern, _ in SUSPICIOUS_PATTERNS:
                 for match in pattern.finditer(text):
                     offset = combined_base + match.start()
-                    # Only emit matches whose start belongs to this new chunk; overlap catches split matches.
+                    # Overlap catches split matches; offsets and evidence are bounded to avoid match floods.
                     if offset in seen_offsets[rule_id]:
                         continue
+                    if len(hits[rule_id]) >= 100:
+                        break
                     seen_offsets[rule_id].add(offset)
-                    if len(hits[rule_id]) < 100:
-                        hits[rule_id].append({"file": info.filename, "match": match.group(0)[:200], "offset_text_chars_approx": offset})
+                    hits[rule_id].append({"file": info.filename, "match": match.group(0)[:200], "offset_text_chars_approx": offset})
             if collect_strings:
                 for index, byte in enumerate(chunk):
                     absolute = chunk_start + index
