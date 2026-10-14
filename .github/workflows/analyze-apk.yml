@@ -40,9 +40,40 @@ jobs:
       - name: Install optional reverse-engineering tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends jadx apktool
+          sudo apt-get install -y --no-install-recommends apktool unzip
           python -m pip install --upgrade pip
           python -m pip install '.[androguard]' apkid
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import urllib.request
+          import zipfile
+
+          api = "https://api.github.com/repos/skylot/jadx/releases/latest"
+          request = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json", "User-Agent": "apk-intelligence-ci"})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              release = json.load(response)
+          asset = next((item for item in release.get("assets", []) if item["name"].endswith(".zip") and item["name"].startswith("jadx-")), None)
+          if asset is None:
+              raise SystemExit("Could not find a JADX release ZIP asset")
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "jadx"
+          target.mkdir(parents=True, exist_ok=True)
+          archive = target / "jadx.zip"
+          download_request = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "apk-intelligence-ci"})
+          with urllib.request.urlopen(download_request, timeout=120) as response, archive.open("wb") as output:
+              output.write(response.read())
+          with zipfile.ZipFile(archive) as zf:
+              zf.extractall(target)
+          bins = list(target.glob("*/bin/jadx"))
+          if not bins:
+              raise SystemExit("JADX ZIP did not contain the expected bin/jadx executable")
+          bin_dir = bins[0].parent
+          os.chmod(bins[0], 0o755)
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path_file:
+              path_file.write(str(bin_dir) + "\n")
+          print(f"Installed JADX from release {release.get('tag_name', 'unknown')}")
+          PY
       - name: Validate download size input
         env:
           MAX_MB: ${{ inputs.max_download_mb }}
