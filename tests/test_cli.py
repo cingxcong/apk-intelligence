@@ -168,6 +168,7 @@ def test_method_level_evidence_links_api_reference_to_method(tmp_path: Path) -> 
             "method_descriptor": "()V",
             "opcode": "invoke-virtual",
             "operands": "Ldalvik/system/DexClassLoader;",
+            "method_code_offset_bytes": 42,
         }) + "\n"
         + "not valid json\n",
         encoding="utf-8",
@@ -180,7 +181,37 @@ def test_method_level_evidence_links_api_reference_to_method(tmp_path: Path) -> 
     assert item["class_descriptor"] == "Lexample/Loader;"
     assert item["method_name"] == "loadPlugin"
     assert item["dex_index"] == 1
+    assert item["method_code_offset_bytes"] == 42
+    assert item["occurrences"] == 1
     assert item["evidence_type"] == "androguard_instruction_api_reference"
+
+
+def test_method_level_evidence_aggregates_repeated_api_hits_and_keeps_offsets(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.jsonl"
+    base = {
+        "dex_index": 0,
+        "class_descriptor": "Lexample/Loader;",
+        "method_name": "loadPlugin",
+        "method_descriptor": "()V",
+        "opcode": "invoke-virtual",
+        "operands": "Ldalvik/system/DexClassLoader;",
+    }
+    rows = [
+        {**base, "method_code_offset_bytes": 10},
+        {**base, "method_code_offset_bytes": 24},
+        {**base, "method_code_offset_bytes": 24},
+    ]
+    instructions.write_text(
+        "".join(json.dumps(row) + "\\n" for row in rows) + json.dumps(["not", "an", "instruction"]) + "\\n",
+        encoding="utf-8",
+    )
+
+    evidence = cli._method_level_evidence(instructions)["dynamic_code_loading"]
+
+    assert len(evidence) == 1
+    assert evidence[0]["method_code_offset_bytes"] == 10
+    assert evidence[0]["additional_instruction_offsets_bytes"] == [24]
+    assert evidence[0]["occurrences"] == 3
 
 
 def test_method_level_evidence_is_bounded_and_attached(tmp_path: Path) -> None:
