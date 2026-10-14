@@ -220,10 +220,22 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
         except Exception:
             pass
         try:
-            from androguard.misc import AnalyzeAPK  # type: ignore
+            from androguard.core.apk import APK  # type: ignore
+            from androguard.core.analysis.analysis import Analysis  # type: ignore
+            from androguard.core.dex import DEX  # type: ignore
             status["available"] = True
-            print("[apkintel] Androguard parsing started; loading DEX/class analysis can be resource-intensive.", file=sys.stderr, flush=True)
-            apk_obj, dexes, analysis = AnalyzeAPK(str(apk_path))
+            print("[apkintel] Androguard parsing started; using DEX inventory mode (cross-reference graph disabled for performance).", file=sys.stderr, flush=True)
+            apk_obj = APK(str(apk_path))
+            dex_payloads = apk_obj.get_all_dex()
+            dexes = []
+            analysis = Analysis()
+            for dex_index, dex_payload in enumerate(dex_payloads):
+                print(f"[apkintel] Androguard: parsing DEX {dex_index + 1}/{len(dex_payloads)} ({len(dex_payload):,} bytes).", file=sys.stderr, flush=True)
+                dex = DEX(dex_payload)
+                dexes.append(dex)
+                analysis.add(dex)
+            print(f"[apkintel] Androguard: DEX parsing complete ({len(dexes)} DEX file(s)); extracting classes and methods.", file=sys.stderr, flush=True)
+            status["cross_references"] = "disabled_for_performance"
             try:
                 status["app_metadata"] = {"package_name": apk_obj.get_package(), "version_name": apk_obj.get_androidversion_name(), "version_code": apk_obj.get_androidversion_code(), "permissions": sorted(set(apk_obj.get_permissions() or []))}
             except Exception as exc:
