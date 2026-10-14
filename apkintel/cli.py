@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from collections import Counter
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ MAX_ENTRIES = 100_000
 MAX_EXPANDED_BYTES = 1_500_000_000
 SCAN_CHUNK_BYTES = 1024 * 1024
 SCAN_OVERLAP_BYTES = 512
+_PRINTABLE_RUN_RE = re.compile(rb"[\\x20-\\x7e]+")
 MAX_STRING_ROWS = 200_000
 TEXT_EXTENSIONS = (".xml", ".txt", ".json", ".properties", ".yml", ".yaml", ".html", ".js", ".smali", ".mf", ".cfg", ".ini")
 SUSPICIOUS_PATTERNS = [
@@ -84,12 +86,28 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
     hits: dict[str, list[dict[str, Any]]] = {rule_id: [] for rule_id, _, _ in SUSPICIOUS_PATTERNS}
     seen_offsets: dict[str, set[int]] = {rule_id: set() for rule_id, _, _ in SUSPICIOUS_PATTERNS}
     overlap = b""
-    absolute_base = 0
     carry = bytearray()
     carry_start = 0
     total = 0
     strings_truncated = False
     overlap_size = max(SCAN_OVERLAP_BYTES, max(len(p.pattern) for _, p, _ in SUSPICIOUS_PATTERNS) * 2)
+    next_progress = 64 * 1024 * 1024
+
+    def emit_string(value: bytes, offset: int) -> None:
+        nonlocal strings_truncated
+        if len(value) < 5:
+            return
+        if len(strings) >= max_strings:
+            strings_truncated = True
+            return
+        strings.append({
+            "value": value[:2000].decode("ascii", errors="ignore"),
+            "source_file": info.filename,
+            "offset_text_chars_approx": offset,
+            "evidence_type": "printable_ascii_sequence",
+            "confidence": "low" if info.filename.endswith((".dex", ".so")) else "medium",
+        })
+
     with archive.open(info, "r") as member:
         while True:
             chunk = member.read(SCAN_CHUNK_BYTES)
@@ -100,6 +118,7 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
             digest.update(chunk)
             if len(prefix) < 112:
                 prefix.extend(chunk[:112 - len(prefix)])
+
             combined = overlap + chunk
             combined_base = chunk_start - len(overlap)
             text = combined.decode("latin-1")
@@ -113,30 +132,46 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
                         break
                     seen_offsets[rule_id].add(offset)
                     hits[rule_id].append({"file": info.filename, "match": match.group(0)[:200], "offset_text_chars_approx": offset})
-            if collect_strings:
-                for index, byte in enumerate(chunk):
-                    absolute = chunk_start + index
-                    if 32 <= byte <= 126:
-                        if not carry:
-                            carry_start = absolute
-                        if len(carry) < 2000:
-                            carry.append(byte)
-                    else:
-                        if len(carry) >= 5:
-                            if len(strings) < max_strings:
-                                strings.append({"value": carry.decode("ascii", errors="ignore"), "source_file": info.filename, "offset_text_chars_approx": carry_start, "evidence_type": "printable_ascii_sequence", "confidence": "low" if info.filename.endswith((".dex", ".so")) else "medium"})
-                            else:
-                                strings_truncated = True
-                        carry.clear()
-            overlap = combined[-overlap_size:]
-            absolute_base += len(chunk)
-    if collect_strings and len(carry) >= 5:
-        if len(strings) < max_strings:
-            strings.append({"value": carry.decode("ascii", errors="ignore"), "source_file": info.filename, "offset_text_chars_approx": carry_start, "evidence_type": "printable_ascii_sequence", "confidence": "low" if info.filename.endswith((".dex", ".so")) else "medium"})
-        else:
-            strings_truncated = True
-    return {"sha256": digest.hexdigest(), "bytes_read": total, "prefix": bytes(prefix), "strings": strings, "strings_truncated": strings_truncated, "pattern_hits": hits}
 
+            if collect_strings:
+                # Regex runs in optimized bytecode rather than iterating in Python over every byte.
+                # Keep only the start of a long run across chunks; emitted string values are capped at 2,000 bytes.
+                matches = list(_PRINTABLE_RUN_RE.finditer(chunk))
+                first_to_process = 0
+                if carry:
+                    if matches and matches[0].start() == 0:
+                        leading = matches[0]
+                        room = max(0, 2000 - len(carry))
+                        if room:
+                            carry.extend(chunk[:min(leading.end(), room)])
+                        if leading.end() == len(chunk):
+                            # The same printable run continues into the next chunk.
+                            first_to_process = 1
+                        else:
+                            emit_string(bytes(carry), carry_start)
+                            carry.clear()
+                            first_to_process = 1
+                    else:
+                        # The previous chunk's trailing run ended at this chunk boundary.
+                        emit_string(bytes(carry), carry_start)
+                        carry.clear()
+
+                for match in matches[first_to_process:]:
+                    run = match.group()
+                    if match.end() == len(chunk):
+                        carry_start = chunk_start + match.start()
+                        carry = bytearray(run[:2000])
+                    elif len(run) >= 5:
+                        emit_string(run[:2000], chunk_start + match.start())
+
+            overlap = combined[-overlap_size:]
+            if total >= next_progress:
+                print(f"[apkintel] Scanning {info.filename}: {total:,}/{info.file_size:,} bytes", file=sys.stderr, flush=True)
+                next_progress = total + 64 * 1024 * 1024
+
+    if collect_strings and carry:
+        emit_string(bytes(carry), carry_start)
+    return {"sha256": digest.hexdigest(), "bytes_read": total, "prefix": bytes(prefix), "strings": strings, "strings_truncated": strings_truncated, "pattern_hits": hits}
 
 def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, java_opts: str | None = None) -> dict[str, Any]:
     executable = shutil.which(argv[0])
@@ -181,6 +216,7 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
         try:
             from androguard.misc import AnalyzeAPK  # type: ignore
             status["available"] = True
+            print("[apkintel] Androguard parsing started; loading DEX/class analysis can be resource-intensive.", file=sys.stderr, flush=True)
             apk_obj, dexes, analysis = AnalyzeAPK(str(apk_path))
             try:
                 status["app_metadata"] = {"package_name": apk_obj.get_package(), "version_name": apk_obj.get_androidversion_name(), "version_code": apk_obj.get_androidversion_code(), "permissions": sorted(set(apk_obj.get_permissions() or []))}
@@ -262,7 +298,9 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     log_dir.mkdir(exist_ok=True)
     if not apk_path.is_file():
         raise FileNotFoundError(f"APK not found: {apk_path}")
+    print(f"[apkintel] Hashing input APK ({apk_path.stat().st_size:,} bytes).", file=sys.stderr, flush=True)
     hashes = file_hashes(apk_path)
+    print("[apkintel] Opening APK archive for chunked scan.", file=sys.stderr, flush=True)
     sample_sha256 = hashes["sha256"]
     run_started = datetime.now(timezone.utc).isoformat()
     findings: list[dict[str, Any]] = []
@@ -284,8 +322,13 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
             archive_summary["expanded_bytes"] = expanded
             if expanded > MAX_EXPANDED_BYTES:
                 raise ValueError(f"Archive expands beyond safety limit ({expanded} bytes).")
-            for info in infos:
+            last_progress = time.monotonic()
+            print(f"[apkintel] Scanning {len(infos):,} archive entries ({expanded:,} expanded bytes).", file=sys.stderr, flush=True)
+            for entry_index, info in enumerate(infos, start=1):
                 name = info.filename
+                if entry_index == 1 or entry_index % 100 == 0 or time.monotonic() - last_progress >= 5:
+                    print(f"[apkintel] Archive entry {entry_index:,}/{len(infos):,}: {name}", file=sys.stderr, flush=True)
+                    last_progress = time.monotonic()
                 if name.startswith("/") or ".." in Path(name).parts:
                     skipped_or_truncated.append({"file": name, "reason": "unsafe_archive_path_not_scanned"})
                     findings.append({"id": "unsafe_archive_path", "severity": "info", "category": "archive", "claim_type": "observed_fact", "message": "Archive contains a path that looks unsafe when extracted; it was not extracted or scanned.", "evidence": [{"file": name}], "confidence": "high"})
