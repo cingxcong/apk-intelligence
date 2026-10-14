@@ -235,6 +235,29 @@ def test_method_level_evidence_aggregates_repeated_api_hits_and_keeps_offsets(tm
     assert evidence[0]["occurrences"] == 3
 
 
+def test_method_level_evidence_skips_rows_without_method_identity(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.jsonl"
+    rows = [
+        {"opcode": "invoke-virtual", "operands": "Ldalvik/system/DexClassLoader;"},
+        {"opcode": "invoke-virtual", "operands": "Ldalvik/system/PathClassLoader;"},
+        {
+            "dex_index": 0,
+            "class_descriptor": "Lexample/Loader;",
+            "method_name": "loadPlugin",
+            "method_descriptor": "()V",
+            "opcode": "invoke-virtual",
+            "operands": "Ldalvik/system/DexClassLoader;",
+        },
+    ]
+    instructions.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
+
+    evidence = cli._method_level_evidence(instructions)["dynamic_code_loading"]
+
+    assert len(evidence) == 1
+    assert evidence[0]["class_descriptor"] == "Lexample/Loader;"
+    assert evidence[0]["occurrences"] == 1
+
+
 def test_method_level_evidence_is_bounded_and_attached(tmp_path: Path) -> None:
     instructions = tmp_path / "instructions.jsonl"
     rows = [
