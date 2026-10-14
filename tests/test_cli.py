@@ -204,3 +204,29 @@ def test_method_level_evidence_is_bounded_and_attached(tmp_path: Path) -> None:
     assert findings[0]["method_evidence_count"] == 5
     assert len(findings[0]["method_evidence"]) == 5
     assert findings[0]["method_evidence"][0]["method_name"] == "load0"
+
+def test_optional_tool_outputs_use_report_root_for_relative_output_dir(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "sample.apk"
+    _make_apk(apk, {"AndroidManifest.xml": b"<manifest/>"})
+    monkeypatch.chdir(tmp_path)
+    calls: list[tuple[str, list[str], Path]] = []
+
+    def fake_run_tool(name, argv, log_dir, **kwargs):
+        calls.append((name, argv, log_dir))
+        return {"tool": name, "status": "ok"}
+
+    monkeypatch.setattr(cli, "_run_tool", fake_run_tool)
+    cli.analyze_apk(
+        apk,
+        Path("analysis-output"),
+        run_optional_tools=True,
+        run_androguard=False,
+    )
+
+    report_root = (tmp_path / "analysis-output").resolve()
+    assert all(log_dir == report_root / "tool-logs" for _, _, log_dir in calls)
+    assert calls[0][1][2] == str(report_root / "jadx")
+    assert calls[1][1][-1] == str(apk.resolve())
+    assert calls[1][1][4] == str(report_root / "apktool")
+    assert (report_root / "manifest.json").is_file()
+    assert not (report_root / "analysis-output").exists()
