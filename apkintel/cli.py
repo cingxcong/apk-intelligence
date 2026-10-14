@@ -572,6 +572,28 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
         tools.append(_run_tool("apktool", ["apktool", "d", "-f", str(apk_path), "-o", str(output_dir / "apktool")], log_dir, timeout=600, java_opts="-Xmx2g"))
         tools.append(_run_tool("apkid", ["apkid", str(apk_path)], log_dir, timeout=180))
 
+    failed_tools = [row for row in tools if row.get("status") in {"error", "timeout"}]
+    if failed_tools:
+        findings.append({
+            "id": "optional_tool_failures",
+            "severity": "warning",
+            "category": "coverage",
+            "claim_type": "observed_fact",
+            "message": "One or more optional analysis tools failed or timed out; inspect tool logs and interpret their outputs as potentially incomplete.",
+            "evidence": [
+                {
+                    "tool": row.get("tool"),
+                    "status": row.get("status"),
+                    "exit_code": row.get("exit_code"),
+                    "reason": row.get("reason"),
+                    "stderr_log": row.get("stderr_log"),
+                }
+                for row in failed_tools
+            ][:100],
+            "confidence": "high",
+            "limitations": "A tool failure does not imply the APK is malicious; it reduces coverage for that tool's analysis.",
+        })
+
     versions = {"apkintel": __version__, "python": sys.version.split()[0], "androguard": None}
     try:
         versions["androguard"] = importlib.metadata.version("androguard")
