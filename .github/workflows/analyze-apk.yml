@@ -125,6 +125,8 @@ jobs:
           fi
           if [ "$SKIP_ANDROGUARD" = "true" ]; then
             args+=(--no-androguard)
+          else
+            args+=(--require-androguard)
           fi
           python -m apkintel "${args[@]}"
       - name: Package analysis bundle
