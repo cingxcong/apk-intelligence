@@ -411,14 +411,14 @@ def test_method_coverage_summary_surfaces_per_method_extraction_errors(tmp_path:
             "has_code": True,
             "instruction_count": 0,
             "instruction_extraction_error": "ValueError: unsupported opcode",
-        }) + "\\n"
+        }) + "\n"
         + json.dumps({
             "dex_index": 0,
             "class_descriptor": "Lexample/NoCode;",
             "name": "stub",
             "descriptor": "()V",
             "has_code": False,
-        }) + "\\n",
+        }) + "\n",
         encoding="utf-8",
     )
 
@@ -437,8 +437,8 @@ def test_method_coverage_summary_surfaces_per_method_extraction_errors(tmp_path:
 def test_log_diagnostics_counts_and_bounds_error_examples(tmp_path: Path) -> None:
     log = tmp_path / "jadx.stdout.txt"
     log.write_text(
-        "INFO - starting\\nERROR - method failed\\n"
-        + "".join(f"Exception: failure {index}\\n" for index in range(40)),
+        "INFO - starting\nERROR - method failed\n"
+        + "".join(f"Exception: failure {index}\n" for index in range(40)),
         encoding="utf-8",
     )
 
@@ -457,8 +457,8 @@ def test_run_tool_records_jadx_reported_error_count_and_duration(tmp_path: Path,
         returncode = 3
 
     def fake_run(command, stdout, stderr, **kwargs):
-        stdout.write("ERROR - finished with errors, count: 259\\n")
-        stderr.write("decoder exception\\n")
+        stdout.write("ERROR - finished with errors, count: 259\n")
+        stderr.write("decoder exception\n")
         return Result()
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
