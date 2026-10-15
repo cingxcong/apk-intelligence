@@ -532,7 +532,7 @@ def test_resource_coverage_distinguishes_inventory_from_semantic_decoding() -> N
     assert summary["incomplete_read_count"] == 1
     assert summary["uncompressed_bytes_total"] == 1250
     assert summary["by_type"] == {"xml": 1, "images": 1, "fonts": 1, "media": 1, "layouts": 1}
-    assert "not claimed" in summary["semantic_decoding"]
+    assert summary["semantic_decoding"].startswith("not_claimed;")
 
 
 
