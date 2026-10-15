@@ -397,3 +397,79 @@ def test_androguard_parse_failure_is_reported_as_coverage_warning(tmp_path: Path
     coverage = next(item for item in findings if item["id"] == "dex_inventory_coverage_mismatch")
     assert coverage["severity"] == "warning"
     assert any(item["kind"] == "androguard_extraction_incomplete" for item in coverage["evidence"])
+
+
+
+def test_method_coverage_summary_surfaces_per_method_extraction_errors(tmp_path: Path) -> None:
+    methods = tmp_path / "methods.jsonl"
+    methods.write_text(
+        json.dumps({
+            "dex_index": 2,
+            "class_descriptor": "Lexample/Broken;",
+            "name": "decode",
+            "descriptor": "()V",
+            "has_code": True,
+            "instruction_count": 0,
+            "instruction_extraction_error": "ValueError: unsupported opcode",
+        }) + "\\n"
+        + json.dumps({
+            "dex_index": 0,
+            "class_descriptor": "Lexample/NoCode;",
+            "name": "stub",
+            "descriptor": "()V",
+            "has_code": False,
+        }) + "\\n",
+        encoding="utf-8",
+    )
+
+    coverage = cli._method_coverage_summary(methods)
+
+    assert coverage["ledger_available"] is True
+    assert coverage["methods_emitted"] == 2
+    assert coverage["methods_with_code"] == 1
+    assert coverage["methods_without_code"] == 1
+    assert coverage["instruction_extraction_errors"] == 1
+    assert coverage["code_extraction_errors"] == 0
+    assert coverage["method_errors_total"] == 1
+    assert coverage["error_examples"][0]["class_descriptor"] == "Lexample/Broken;"
+
+
+def test_log_diagnostics_counts_and_bounds_error_examples(tmp_path: Path) -> None:
+    log = tmp_path / "jadx.stdout.txt"
+    log.write_text(
+        "INFO - starting\\nERROR - method failed\\n"
+        + "".join(f"Exception: failure {index}\\n" for index in range(40)),
+        encoding="utf-8",
+    )
+
+    diagnostics = cli._log_diagnostics(log, max_examples=5)
+
+    assert diagnostics["bytes"] == log.stat().st_size
+    assert diagnostics["matching_line_count"] == 41
+    assert len(diagnostics["examples"]) == 5
+    assert diagnostics["examples"][0]["line"] == 2
+
+
+def test_run_tool_records_jadx_reported_error_count_and_duration(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda command: "/usr/bin/jadx")
+
+    class Result:
+        returncode = 3
+
+    def fake_run(command, stdout, stderr, **kwargs):
+        stdout.write("ERROR - finished with errors, count: 259\\n")
+        stderr.write("decoder exception\\n")
+        return Result()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    logs = tmp_path / "tool-logs"
+    logs.mkdir()
+
+    result = cli._run_tool("jadx", ["jadx", "-d", "out", "sample.apk"], logs)
+
+    assert result["status"] == "error"
+    assert result["exit_code"] == 3
+    assert result["reported_decompilation_error_count"] == 259
+    assert result["duration_seconds"] >= 0
+    assert result["log_diagnostics"]["stdout"]["matching_line_count"] == 1
+    assert result["log_diagnostics"]["stderr"]["matching_line_count"] == 1
