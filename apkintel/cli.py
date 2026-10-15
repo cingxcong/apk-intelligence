@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.metadata
 import json
@@ -787,9 +788,20 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
 
     tools: list[dict[str, Any]] = []
     if run_optional_tools:
-        tools.append(_run_tool("jadx", ["jadx", "-d", str(output_dir / "jadx"), str(apk_path)], log_dir, timeout=900, java_opts="-Xmx3g"))
-        tools.append(_run_tool("apktool", ["apktool", "d", "-f", str(apk_path), "-o", str(output_dir / "apktool")], log_dir, timeout=600, java_opts="-Xmx2g"))
-        tools.append(_run_tool("apkid", ["apkid", str(apk_path)], log_dir, timeout=180))
+        # These tools read the same immutable APK but write to separate output/log
+        # paths. Run concurrently to reduce wall-clock latency on large samples.
+        # Keep result ordering deterministic for stable reports and tests.
+        tool_jobs = [
+            ("jadx", ["jadx", "-d", str(output_dir / "jadx"), str(apk_path)], 900, "-Xmx3g"),
+            ("apktool", ["apktool", "d", "-f", str(apk_path), "-o", str(output_dir / "apktool")], 600, "-Xmx2g"),
+            ("apkid", ["apkid", str(apk_path)], 180, None),
+        ]
+        with ThreadPoolExecutor(max_workers=len(tool_jobs), thread_name_prefix="apkintel-tool") as pool:
+            futures = [
+                pool.submit(_run_tool, name, argv, log_dir, timeout=timeout, java_opts=java_opts)
+                for name, argv, timeout, java_opts in tool_jobs
+            ]
+            tools = [future.result() for future in futures]
 
     failed_tools = [row for row in tools if row.get("status") in {"error", "timeout"}]
     if failed_tools:
