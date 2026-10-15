@@ -583,6 +583,36 @@ def _attach_method_level_evidence(findings: list[dict[str, Any]], instructions_p
         finding["method_evidence"] = rows
         finding["method_evidence_count"] = len(rows)
 
+def _resource_coverage_summary(files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Inventory packaged resources without implying that binary resources were semantically decoded."""
+    resource_files = [
+        row for row in files
+        if not row.get("directory") and str(row.get("path", "")).startswith(("res/", "assets/"))
+    ]
+    categories = {
+        "xml": {".xml"},
+        "images": {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".avif", ".heic"},
+        "fonts": {".ttf", ".otf", ".woff", ".woff2"},
+        "media": {".mp3", ".wav", ".ogg", ".mp4", ".webm", ".m4a", ".aac", ".3gp"},
+        "layouts": set(),
+    }
+    counts = {name: 0 for name in categories}
+    for row in resource_files:
+        path = str(row.get("path", ""))
+        suffix = Path(path).suffix.lower()
+        for name, extensions in categories.items():
+            if suffix in extensions or (name == "layouts" and path.startswith("res/layout")):
+                counts[name] += 1
+    return {
+        "inventory_count": len(resource_files),
+        "hashed_count": sum(bool(row.get("sha256")) for row in resource_files),
+        "read_error_count": sum(bool(row.get("read_error")) for row in resource_files),
+        "incomplete_read_count": sum(row.get("bytes_read") is not None and row.get("bytes_read") != row.get("uncompressed_bytes") for row in resource_files),
+        "uncompressed_bytes_total": sum(int(row.get("uncompressed_bytes") or 0) for row in resource_files),
+        "by_type": counts,
+        "semantic_decoding": "not_claimed; archive inventory and hashes do not mean binary assets were decoded",
+    }
+
 def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = True, run_androguard: bool = True, max_methods: int | None = 100_000) -> dict[str, Any]:
     apk_path = apk_path.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -791,7 +821,8 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     except importlib.metadata.PackageNotFoundError:
         pass
     tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid", distribution="apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
-    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "dex_inventory": dex_coverage, "method_coverage": method_coverage, "coverage_warnings": coverage_warnings, "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
+    resource_coverage = _resource_coverage_summary(files)
+    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "resource_coverage": resource_coverage, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "dex_inventory": dex_coverage, "method_coverage": method_coverage, "coverage_warnings": coverage_warnings, "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
 
     _jsonl(output_dir / "files.jsonl", files)
     _jsonl(output_dir / "dex.jsonl", dex_rows)
