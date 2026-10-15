@@ -473,3 +473,47 @@ def test_run_tool_records_jadx_reported_error_count_and_duration(tmp_path: Path,
     assert result["duration_seconds"] >= 0
     assert result["log_diagnostics"]["stdout"]["matching_line_count"] == 1
     assert result["log_diagnostics"]["stderr"]["matching_line_count"] == 1
+
+def test_string_truncation_is_in_coverage_warnings(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "strings.apk"
+    _make_apk(apk, {"assets/strings.txt": b"alpha_string\nsecond_string\nthird_string\n"})
+    output = tmp_path / "out"
+    monkeypatch.setattr(cli, "MAX_STRING_ROWS", 1)
+
+    cli.analyze_apk(apk, output, run_optional_tools=False, run_androguard=False)
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    warnings = manifest["coverage"]["coverage_warnings"]
+    warning = next(item for item in warnings if item["kind"] == "printable_string_output_truncated")
+    assert warning["limit"] == 1
+    assert warning["affected_files"] == ["assets/strings.txt"]
+    assert manifest["coverage"]["strings_truncated"] is True
+    assert any(item["id"] == "analysis_coverage_limited" for item in _findings(output))
+
+
+def test_reference_truncation_is_in_coverage_warnings(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "references.apk"
+    _make_apk(apk, {"classes.dex": b"dex\\n035\\x00" + b"\\x00" * 112})
+    output = tmp_path / "out"
+
+    def fake_extract(apk_path, output_dir, max_methods=100_000):
+        for filename in ("classes.jsonl", "methods.jsonl", "instructions.jsonl", "references.jsonl"):
+            (output_dir / filename).write_text("", encoding="utf-8")
+        return {
+            "available": True, "status": "ok", "classes": 0, "methods": 0,
+            "instructions": 0, "references": 200_000, "references_truncated": True,
+            "reference_note": "Reference output reached the row cap.",
+            "dex_count": 1, "truncated": False, "max_methods": max_methods,
+        }
+
+    monkeypatch.setattr(cli, "_androguard_extract", fake_extract)
+    cli.analyze_apk(apk, output, run_optional_tools=False, run_androguard=True)
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    warning = next(item for item in manifest["coverage"]["coverage_warnings"] if item["kind"] == "reference_output_truncated")
+    assert warning["emitted_reference_rows"] == 200_000
+    assert warning["limit"] == cli.MAX_REFERENCE_ROWS
+    assert warning["note"] == "Reference output reached the row cap."
+    finding = next(item for item in _findings(output) if item["id"] == "dex_inventory_coverage_mismatch")
+    assert any(item["kind"] == "reference_output_truncated" for item in finding["evidence"])
+
