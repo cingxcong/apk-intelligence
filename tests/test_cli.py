@@ -517,3 +517,20 @@ def test_reference_truncation_is_in_coverage_warnings(tmp_path: Path, monkeypatc
     finding = next(item for item in _findings(output) if item["id"] == "dex_inventory_coverage_mismatch")
     assert any(item["kind"] == "reference_output_truncated" for item in finding["evidence"])
 
+def test_resource_coverage_distinguishes_inventory_from_semantic_decoding() -> None:
+    summary = cli._resource_coverage_summary([
+        {"path": "res/layout/main.xml", "directory": False, "sha256": "abc", "uncompressed_bytes": 100, "bytes_read": 100},
+        {"path": "res/drawable/icon.png", "directory": False, "sha256": "def", "uncompressed_bytes": 250, "bytes_read": 250},
+        {"path": "assets/fonts/app.ttf", "directory": False, "sha256": "ghi", "uncompressed_bytes": 400, "bytes_read": 300},
+        {"path": "assets/sound.mp3", "directory": False, "read_error": "IOError", "uncompressed_bytes": 500},
+        {"path": "res/layout", "directory": True, "uncompressed_bytes": 0},
+    ])
+
+    assert summary["inventory_count"] == 4
+    assert summary["hashed_count"] == 3
+    assert summary["read_error_count"] == 1
+    assert summary["incomplete_read_count"] == 1
+    assert summary["uncompressed_bytes_total"] == 1250
+    assert summary["by_type"] == {"xml": 1, "images": 1, "fonts": 1, "media": 1, "layouts": 1}
+    assert "not claimed" in summary["semantic_decoding"]
+
