@@ -220,6 +220,23 @@ def _read_log_tail(path: Path, max_chars: int = 4000) -> str | None:
         return None
 
 
+def _log_diagnostics(path: Path, max_examples: int = 25) -> dict[str, Any]:
+    """Summarize tool log errors without loading potentially large logs into memory."""
+    result: dict[str, Any] = {"path": path.name, "bytes": 0, "matching_line_count": 0, "examples": []}
+    try:
+        result["bytes"] = path.stat().st_size
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                stripped = line.strip()
+                if stripped and re.search(r"\b(error|exception|failed|failure|cannot|unable)\b", stripped, re.IGNORECASE):
+                    result["matching_line_count"] += 1
+                    if len(result["examples"]) < max_examples:
+                        result["examples"].append({"line": line_number, "text": stripped[-1000:]})
+    except OSError as exc:
+        result["read_error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, java_opts: str | None = None) -> dict[str, Any]:
     executable = shutil.which(argv[0])
     record: dict[str, Any] = {"tool": name, "available": bool(executable), "command": argv, "status": "skipped", "timeout_seconds": timeout}
@@ -236,6 +253,7 @@ def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, jav
     record["command"] = command
     stdout_path = log_dir / f"{name}.stdout.txt"
     stderr_path = log_dir / f"{name}.stderr.txt"
+    started = time.monotonic()
     try:
         # Stream tool output to disk rather than retaining potentially huge logs in RAM.
         with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle, stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_handle:
@@ -244,7 +262,14 @@ def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, jav
     except subprocess.TimeoutExpired:
         record.update({"status": "timeout", "reason": "Tool exceeded configured timeout.", "stdout_log": f"tool-logs/{name}.stdout.txt", "stderr_log": f"tool-logs/{name}.stderr.txt"})
     except Exception as exc:
-        record.update({"status": "error", "error": str(exc)})
+        record.update({"status": "error", "error": str(exc), "stdout_log": f"tool-logs/{name}.stdout.txt", "stderr_log": f"tool-logs/{name}.stderr.txt"})
+    record["duration_seconds"] = round(time.monotonic() - started, 3)
+    record["log_diagnostics"] = {"stdout": _log_diagnostics(stdout_path), "stderr": _log_diagnostics(stderr_path)}
+    if name == "jadx":
+        combined_tail = "\n".join(filter(None, (_read_log_tail(stdout_path), _read_log_tail(stderr_path))))
+        match = re.search(r"finished with errors, count:\s*(\d+)", combined_tail, re.IGNORECASE)
+        if match:
+            record["reported_decompilation_error_count"] = int(match.group(1))
     return record
 
 
@@ -351,6 +376,60 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
         logging.disable(previous_disable)
     return status
 
+
+
+def _method_coverage_summary(methods_path: Path) -> dict[str, Any]:
+    """Count method-level extraction outcomes, including errors hidden by parser-level success."""
+    result: dict[str, Any] = {
+        "ledger_available": methods_path.is_file(),
+        "methods_emitted": 0,
+        "methods_with_code": 0,
+        "methods_without_code": 0,
+        "code_extraction_errors": 0,
+        "instruction_extraction_errors": 0,
+        "methods_with_instruction_counts": 0,
+        "instruction_rows_emitted": 0,
+        "error_examples": [],
+        "ledger_complete_for_emitted_methods": True,
+    }
+    if not methods_path.is_file():
+        return result
+    with methods_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                result["ledger_complete_for_emitted_methods"] = False
+                if len(result["error_examples"]) < 20:
+                    result["error_examples"].append({"line": line_number, "kind": "invalid_method_json"})
+                continue
+            if not isinstance(row, dict):
+                result["ledger_complete_for_emitted_methods"] = False
+                continue
+            result["methods_emitted"] += 1
+            if row.get("has_code") is True:
+                result["methods_with_code"] += 1
+            elif row.get("has_code") is False:
+                result["methods_without_code"] += 1
+            if "instruction_count" in row:
+                result["methods_with_instruction_counts"] += 1
+                result["instruction_rows_emitted"] += int(row.get("instruction_count") or 0)
+            for field, counter in (("code_extraction_error", "code_extraction_errors"), ("instruction_extraction_error", "instruction_extraction_errors")):
+                if row.get(field):
+                    result[counter] += 1
+                    if len(result["error_examples"]) < 20:
+                        result["error_examples"].append({
+                            "dex_index": row.get("dex_index"),
+                            "class_descriptor": row.get("class_descriptor"),
+                            "method_name": row.get("name"),
+                            "method_descriptor": row.get("descriptor"),
+                            "kind": field,
+                            "error": str(row[field])[:500],
+                        })
+    result["method_errors_total"] = result["code_extraction_errors"] + result["instruction_extraction_errors"]
+    return result
 
 
 def _dex_coverage_summary(dex_rows: list[dict[str, Any]], androguard_status: dict[str, Any], classes_path: Path) -> dict[str, Any]:
@@ -612,6 +691,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
         for filename in ("classes.jsonl", "methods.jsonl", "instructions.jsonl", "references.jsonl"):
             (output_dir / filename).write_text("", encoding="utf-8")
     dex_coverage = _dex_coverage_summary(dex_rows, androguard_status, output_dir / "classes.jsonl")
+    method_coverage = _method_coverage_summary(output_dir / "methods.jsonl")
     coverage_warnings = []
     if run_androguard and androguard_status.get("status") != "ok":
         coverage_warnings.append({
@@ -619,6 +699,14 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
             "status": androguard_status.get("status"),
             "error": androguard_status.get("error"),
             "note": androguard_status.get("note"),
+        })
+    if method_coverage.get("code_extraction_errors", 0) or method_coverage.get("instruction_extraction_errors", 0):
+        coverage_warnings.append({
+            "kind": "method_level_extraction_errors",
+            "code_extraction_errors": method_coverage["code_extraction_errors"],
+            "instruction_extraction_errors": method_coverage["instruction_extraction_errors"],
+            "examples": method_coverage["error_examples"][:10],
+            "note": "Parser status may be ok even when individual methods failed extraction; inspect method_coverage and methods.jsonl.",
         })
     if dex_coverage["dex_count_matches_archive"] is False:
         coverage_warnings.append({
@@ -685,7 +773,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     except importlib.metadata.PackageNotFoundError:
         pass
     tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid", distribution="apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
-    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "dex_inventory": dex_coverage, "coverage_warnings": coverage_warnings, "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
+    manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "dex_inventory": dex_coverage, "method_coverage": method_coverage, "coverage_warnings": coverage_warnings, "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
 
     _jsonl(output_dir / "files.jsonl", files)
     _jsonl(output_dir / "dex.jsonl", dex_rows)
@@ -693,12 +781,14 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
     (output_dir / "findings.json").write_text(json.dumps({"schema_version": "1.0", "findings": findings}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     counts = Counter(row["category"] for row in findings)
-    summary = ["# APK Intelligence Report", "", f"- **Sample:** {apk_path.name}", f"- **SHA-256:** {sample_sha256}", f"- **Size:** {apk_path.stat().st_size:,} bytes", f"- **DEX files:** {len(dex_rows)}", f"- **Archive entries:** {len(files)}", f"- **Extracted printable strings:** {len(string_rows)}", f"- **Parsed classes / methods:** {androguard_status.get('classes', 0)} / {androguard_status.get('methods', 0)}", f"- **Instructions / cross-references:** {androguard_status.get('instructions', 0)} / {androguard_status.get('references', 0)}", f"- **Static findings:** {len(findings)}", "", "## Finding categories", ""]
+    summary = ["# APK Intelligence Report", "", f"- **Sample:** {apk_path.name}", f"- **SHA-256:** {sample_sha256}", f"- **Size:** {apk_path.stat().st_size:,} bytes", f"- **DEX files:** {len(dex_rows)}", f"- **Archive entries:** {len(files)}", f"- **Extracted printable strings:** {len(string_rows)}", f"- **Parsed classes / methods:** {androguard_status.get('classes', 0)} / {androguard_status.get('methods', 0)}", f"- **Instructions / cross-references:** {androguard_status.get('instructions', 0)} / {androguard_status.get('references', 0)}", f"- **Method extraction errors:** {method_coverage.get('method_errors_total', 0)} (code: {method_coverage.get('code_extraction_errors', 0)}, instructions: {method_coverage.get('instruction_extraction_errors', 0)})", f"- **Static findings:** {len(findings)}", "", "## Finding categories", ""]
     summary.extend([f"- {key}: {value}" for key, value in sorted(counts.items())] or ["- None"])
     summary.extend(["", "## DEX fingerprints", ""])
     summary.extend([f"- {row['path']} — SHA-256 {row['sha256']}, {row['bytes']:,} bytes, magic {row['magic']}" for row in dex_rows] or ["- No standard DEX entries detected."])
     summary.extend(["", "## Evidence and interpretation", "", "Findings distinguish observed facts from heuristic indicators. Pattern matches are not proof of maliciousness, and static analysis cannot reveal all runtime behavior. See findings.json, manifest.json, and JSONL indexes for machine-readable data.", "", "## Optional tool results", ""])
-    summary.extend([f"- {row.get('tool')}: {row.get('status')}" for row in tools] or ["- Optional tools were disabled."])
+    summary.extend([f"- {row.get('tool')}: {row.get('status')}" + (f" ({row.get('reported_decompilation_error_count')} reported errors)" if row.get("reported_decompilation_error_count") is not None else "") for row in tools] or ["- Optional tools were disabled."])
+    if any(row.get("tool") == "jadx" and row.get("status") != "ok" for row in tools):
+        summary.extend(["", "JADX did not complete cleanly. Partial Java output may be useful, but it is not evidence of complete decompilation. See optional_tools in manifest.json and tool-logs/jadx.*.txt diagnostics."])
     (output_dir / "summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     return manifest
 
