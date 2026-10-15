@@ -599,6 +599,13 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
             (output_dir / filename).write_text("", encoding="utf-8")
     dex_coverage = _dex_coverage_summary(dex_rows, androguard_status, output_dir / "classes.jsonl")
     coverage_warnings = []
+    if run_androguard and androguard_status.get("status") != "ok":
+        coverage_warnings.append({
+            "kind": "androguard_extraction_incomplete",
+            "status": androguard_status.get("status"),
+            "error": androguard_status.get("error"),
+            "note": androguard_status.get("note"),
+        })
     if dex_coverage["dex_count_matches_archive"] is False:
         coverage_warnings.append({
             "kind": "dex_count_mismatch",
