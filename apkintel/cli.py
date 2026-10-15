@@ -700,6 +700,24 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
             "error": androguard_status.get("error"),
             "note": androguard_status.get("note"),
         })
+    if strings_truncated:
+        coverage_warnings.append({
+            "kind": "printable_string_output_truncated",
+            "limit": MAX_STRING_ROWS,
+            "strings_emitted_before_deduplication": len(string_rows),
+            "affected_files": [
+                item["file"] for item in skipped_or_truncated
+                if item.get("reason") == "printable_string_output_limit"
+            ],
+            "note": "String scanning continued for archive integrity and pattern indicators, but printable-string rows were capped; the string dataset is incomplete.",
+        })
+    if androguard_status.get("references_truncated"):
+        coverage_warnings.append({
+            "kind": "reference_output_truncated",
+            "emitted_reference_rows": androguard_status.get("references", 0),
+            "limit": MAX_REFERENCE_ROWS,
+            "note": androguard_status.get("reference_note") or "Reference output was capped; additional invoke targets may be omitted.",
+        })
     if method_coverage.get("code_extraction_errors", 0) or method_coverage.get("instruction_extraction_errors", 0):
         coverage_warnings.append({
             "kind": "method_level_extraction_errors",
