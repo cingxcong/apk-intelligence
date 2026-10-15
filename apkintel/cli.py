@@ -49,14 +49,39 @@ def file_hashes(path: Path) -> dict[str, str]:
     return {name: digest.hexdigest() for name, digest in digests.items()}
 
 
-def tool_version(command: str, args: list[str] | None = None) -> dict[str, Any]:
+def tool_version(
+    command: str,
+    args: list[str] | None = None,
+    distribution: str | None = None,
+) -> dict[str, Any]:
     executable = shutil.which(command)
     if not executable:
         return {"available": False, "path": None, "version": None}
+    if distribution:
+        try:
+            version = importlib.metadata.version(distribution)
+            return {"available": True, "path": executable, "version": version}
+        except importlib.metadata.PackageNotFoundError:
+            return {
+                "available": True,
+                "path": executable,
+                "version": None,
+                "version_source": "package_metadata_unavailable",
+            }
+        except Exception as exc:
+            return {"available": True, "path": executable, "version": None, "error": str(exc)}
     try:
         result = subprocess.run([executable, *(args or ["--version"])], capture_output=True, text=True, timeout=15, check=False)
         output = (result.stdout + "\n" + result.stderr).strip()[:1000]
-        return {"available": True, "path": executable, "version": output or f"exit={result.returncode}"}
+        if result.returncode != 0:
+            return {
+                "available": True,
+                "path": executable,
+                "version": None,
+                "version_probe_exit_code": result.returncode,
+                "version_probe_output": output or None,
+            }
+        return {"available": True, "path": executable, "version": output or None}
     except Exception as exc:
         return {"available": True, "path": executable, "version": None, "error": str(exc)}
 
@@ -636,7 +661,7 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
         versions["androguard"] = importlib.metadata.version("androguard")
     except importlib.metadata.PackageNotFoundError:
         pass
-    tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
+    tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid", distribution="apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
     manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "dex_inventory": dex_coverage, "coverage_warnings": coverage_warnings, "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
 
     _jsonl(output_dir / "files.jsonl", files)
