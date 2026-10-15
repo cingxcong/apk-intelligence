@@ -801,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--out", type=Path, default=Path("analysis-output"))
     analyze.add_argument("--no-optional-tools", action="store_true", help="Skip JADX/Apktool/APKiD subprocesses.")
     analyze.add_argument("--no-androguard", action="store_true", help="Skip Androguard parsing.")
-    analyze.add_argument("--max-methods", type=int, default=100_000, help="Maximum methods to emit from Androguard (0 means unlimited).")
+    analyze.add_argument("--max-methods", type=int, default=0, help="Maximum methods to emit from Androguard (0 means unlimited; default: unlimited).")
     analyze.add_argument("--require-androguard", action="store_true", help="Return a nonzero exit code unless Androguard extraction succeeds.")
     fetch = sub.add_parser("analyze-url", help="Safely download an HTTPS APK URL and analyze it.")
     fetch.add_argument("url")
@@ -809,7 +809,7 @@ def main(argv: list[str] | None = None) -> int:
     fetch.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     fetch.add_argument("--no-optional-tools", action="store_true")
     fetch.add_argument("--no-androguard", action="store_true")
-    fetch.add_argument("--max-methods", type=int, default=100_000)
+    fetch.add_argument("--max-methods", type=int, default=0, help="Maximum methods to emit from Androguard (0 means unlimited; default: unlimited).")
     fetch.add_argument("--require-androguard", action="store_true", help="Return a nonzero exit code unless Androguard extraction succeeds.")
     args = parser.parse_args(argv)
     try:
