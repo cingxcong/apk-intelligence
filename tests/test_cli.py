@@ -331,3 +331,33 @@ def test_optional_tool_failure_is_reported_as_coverage_warning(tmp_path: Path, m
     assert failure["category"] == "coverage"
     assert failure["evidence"][0]["tool"] == "jadx"
     assert failure["evidence"][0]["exit_code"] == 3
+
+
+def test_tool_version_uses_package_metadata_when_requested(monkeypatch) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda command: "/usr/bin/apkid")
+    monkeypatch.setattr(cli.importlib.metadata, "version", lambda distribution: "3.3.0")
+
+    result = cli.tool_version("apkid", distribution="apkid")
+
+    assert result == {
+        "available": True,
+        "path": "/usr/bin/apkid",
+        "version": "3.3.0",
+    }
+
+
+def test_tool_version_does_not_report_failed_probe_as_version(monkeypatch) -> None:
+    class Result:
+        stdout = ""
+        stderr = "unrecognized arguments: --version"
+        returncode = 2
+
+    monkeypatch.setattr(cli.shutil, "which", lambda command: "/usr/bin/tool")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: Result())
+
+    result = cli.tool_version("tool")
+
+    assert result["available"] is True
+    assert result["version"] is None
+    assert result["version_probe_exit_code"] == 2
+    assert "unrecognized arguments" in result["version_probe_output"]
