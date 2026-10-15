@@ -314,11 +314,14 @@ def test_optional_tool_failure_is_reported_as_coverage_warning(tmp_path: Path, m
 
     def fake_run_tool(name, argv, log_dir, **kwargs):
         if name == "jadx":
+            (log_dir / "jadx.stderr.txt").write_text("decoder failed: unsupported instruction", encoding="utf-8")
+            (log_dir / "jadx.stdout.txt").write_text("partial output retained", encoding="utf-8")
             return {
                 "tool": name,
                 "status": "error",
                 "exit_code": 3,
                 "stderr_log": "tool-logs/jadx.stderr.txt",
+                "stdout_log": "tool-logs/jadx.stdout.txt",
             }
         return {"tool": name, "status": "ok"}
 
@@ -331,6 +334,8 @@ def test_optional_tool_failure_is_reported_as_coverage_warning(tmp_path: Path, m
     assert failure["category"] == "coverage"
     assert failure["evidence"][0]["tool"] == "jadx"
     assert failure["evidence"][0]["exit_code"] == 3
+    assert "unsupported instruction" in failure["evidence"][0]["stderr_tail"]
+    assert "partial output retained" in failure["evidence"][0]["stdout_tail"]
 
 
 def test_tool_version_uses_package_metadata_when_requested(monkeypatch) -> None:
