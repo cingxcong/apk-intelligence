@@ -534,3 +534,24 @@ def test_resource_coverage_distinguishes_inventory_from_semantic_decoding() -> N
     assert summary["by_type"] == {"xml": 1, "images": 1, "fonts": 1, "media": 1, "layouts": 1}
     assert "not claimed" in summary["semantic_decoding"]
 
+
+
+def test_optional_tools_run_concurrently_and_keep_deterministic_order(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "sample.apk"
+    _make_apk(apk, {"AndroidManifest.xml": b"<manifest/>"})
+    started: list[str] = []
+
+    def fake_run_tool(name, argv, log_dir, **kwargs):
+        started.append(name)
+        return {"tool": name, "status": "ok"}
+
+    monkeypatch.setattr(cli, "_run_tool", fake_run_tool)
+    manifest = cli.analyze_apk(
+        apk,
+        tmp_path / "out",
+        run_optional_tools=True,
+        run_androguard=False,
+    )
+
+    assert sorted(started) == ["apkid", "apktool", "jadx"]
+    assert [row["tool"] for row in manifest["optional_tools"]] == ["jadx", "apktool", "apkid"]
