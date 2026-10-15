@@ -361,3 +361,34 @@ def test_tool_version_does_not_report_failed_probe_as_version(monkeypatch) -> No
     assert result["version"] is None
     assert result["version_probe_exit_code"] == 2
     assert "unrecognized arguments" in result["version_probe_output"]
+
+
+def test_androguard_parse_failure_is_reported_as_coverage_warning(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "sample.apk"
+    _make_apk(apk, {"classes.dex": b"dex\n035\x00" + b"\x00" * 112})
+    output = tmp_path / "out"
+
+    def fake_extract(apk_path, output_dir, max_methods=100_000):
+        for filename in ("classes.jsonl", "methods.jsonl", "instructions.jsonl", "references.jsonl"):
+            (output_dir / filename).write_text("", encoding="utf-8")
+        return {
+            "available": True,
+            "status": "error",
+            "error": "Androguard parse failed: ValueError: malformed DEX",
+            "max_methods": max_methods,
+        }
+
+    monkeypatch.setattr(cli, "_androguard_extract", fake_extract)
+    cli.analyze_apk(apk, output, run_optional_tools=False, run_androguard=True)
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["androguard_extraction"]["status"] == "error"
+    assert any(
+        warning["kind"] == "androguard_extraction_incomplete"
+        and warning["status"] == "error"
+        for warning in manifest["coverage"]["coverage_warnings"]
+    )
+    findings = _findings(output)
+    coverage = next(item for item in findings if item["id"] == "dex_inventory_coverage_mismatch")
+    assert coverage["severity"] == "warning"
+    assert any(item["kind"] == "androguard_extraction_incomplete" for item in coverage["evidence"])
