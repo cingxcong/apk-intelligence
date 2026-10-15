@@ -25,6 +25,8 @@ SCAN_CHUNK_BYTES = 1024 * 1024
 SCAN_OVERLAP_BYTES = 512
 _PRINTABLE_RUN_RE = re.compile(rb"[\x20-\x7e]+")
 MAX_STRING_ROWS = 200_000
+MAX_REFERENCE_ROWS = 200_000
+_METHOD_REFERENCE_RE = re.compile(r"(?P<class>L[^;\s]+;)->(?P<name>[^\s(]+)(?P<descriptor>\([^\s]*\)[^\s,]*)")
 TEXT_EXTENSIONS = (".xml", ".txt", ".json", ".properties", ".yml", ".yaml", ".html", ".js", ".smali", ".mf", ".cfg", ".ini")
 SUSPICIOUS_PATTERNS = [
     ("dynamic_code_loading", re.compile(r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader"), "Dynamic code-loading API reference found."),
@@ -47,14 +49,39 @@ def file_hashes(path: Path) -> dict[str, str]:
     return {name: digest.hexdigest() for name, digest in digests.items()}
 
 
-def tool_version(command: str, args: list[str] | None = None) -> dict[str, Any]:
+def tool_version(
+    command: str,
+    args: list[str] | None = None,
+    distribution: str | None = None,
+) -> dict[str, Any]:
     executable = shutil.which(command)
     if not executable:
         return {"available": False, "path": None, "version": None}
+    if distribution:
+        try:
+            version = importlib.metadata.version(distribution)
+            return {"available": True, "path": executable, "version": version}
+        except importlib.metadata.PackageNotFoundError:
+            return {
+                "available": True,
+                "path": executable,
+                "version": None,
+                "version_source": "package_metadata_unavailable",
+            }
+        except Exception as exc:
+            return {"available": True, "path": executable, "version": None, "error": str(exc)}
     try:
         result = subprocess.run([executable, *(args or ["--version"])], capture_output=True, text=True, timeout=15, check=False)
         output = (result.stdout + "\n" + result.stderr).strip()[:1000]
-        return {"available": True, "path": executable, "version": output or f"exit={result.returncode}"}
+        if result.returncode != 0:
+            return {
+                "available": True,
+                "path": executable,
+                "version": None,
+                "version_probe_exit_code": result.returncode,
+                "version_probe_output": output or None,
+            }
+        return {"available": True, "path": executable, "version": output or None}
     except Exception as exc:
         return {"available": True, "path": executable, "version": None, "error": str(exc)}
 
@@ -179,6 +206,20 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
         emit_string(bytes(carry), carry_start)
     return {"sha256": digest.hexdigest(), "bytes_read": total, "prefix": bytes(prefix), "strings": strings, "strings_truncated": strings_truncated, "pattern_hits": hits}
 
+def _read_log_tail(path: Path, max_chars: int = 4000) -> str | None:
+    """Return a bounded diagnostic tail without loading a potentially huge log."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - max_chars * 4))
+            data = handle.read()
+        text = data.decode("utf-8", errors="replace").strip()
+        return text[-max_chars:] or None
+    except OSError:
+        return None
+
+
 def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, java_opts: str | None = None) -> dict[str, Any]:
     executable = shutil.which(argv[0])
     record: dict[str, Any] = {"tool": name, "available": bool(executable), "command": argv, "status": "skipped", "timeout_seconds": timeout}
@@ -207,6 +248,14 @@ def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, jav
     return record
 
 
+def _parse_method_reference(operands: str) -> dict[str, str] | None:
+    """Extract a direct DEX method target from Androguard's rendered invoke operands."""
+    match = _METHOD_REFERENCE_RE.search(operands)
+    if match is None:
+        return None
+    return {"target_class_descriptor": match.group("class"), "target_method_name": match.group("name"), "target_method_descriptor": match.group("descriptor")}
+
+
 def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | None = 100_000) -> dict[str, Any]:
     """Stream Androguard records to JSONL instead of accumulating result lists."""
     status: dict[str, Any] = {"available": False, "status": "skipped", "note": "Install a compatible Androguard release to enable structured class/method extraction.", "max_methods": max_methods}
@@ -223,7 +272,7 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
             from androguard.core.apk import APK  # type: ignore
             from androguard.core.dex import DEX  # type: ignore
             status["available"] = True
-            print("[apkintel] Androguard parsing started; using DEX inventory mode (cross-reference graph disabled for performance).", file=sys.stderr, flush=True)
+            print("[apkintel] Androguard parsing started; using DEX inventory mode with bounded symbolic invoke-target extraction.", file=sys.stderr, flush=True)
             apk_obj = APK(str(apk_path))
             # Androguard 4.1.x exposes get_all_dex() as a generator.
             # Materialize it once so progress reporting can safely use len().
@@ -234,12 +283,13 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
                 dex = DEX(dex_payload)
                 dexes.append(dex)
             print(f"[apkintel] Androguard: DEX parsing complete ({len(dexes)} DEX file(s)); extracting classes and methods.", file=sys.stderr, flush=True)
-            status["cross_references"] = "disabled_for_performance"
+            status["cross_references"] = "bounded_instruction_operand_scan"
             try:
                 status["app_metadata"] = {"package_name": apk_obj.get_package(), "version_name": apk_obj.get_androidversion_name(), "version_code": apk_obj.get_androidversion_code(), "permissions": sorted(set(apk_obj.get_permissions() or []))}
             except Exception as exc:
                 status["app_metadata_error"] = f"{type(exc).__name__}: {exc}"
             methods_seen = 0
+            references_truncated = False
             truncated = False
             for dex_index, dex in enumerate(dexes):
                 for cls in dex.get_classes():
@@ -268,7 +318,16 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
                                 try:
                                     for ins in method.get_instructions():
                                         length = int(ins.get_length()) if hasattr(ins, "get_length") else 0
-                                        writers["instructions"].write({"dex_index": dex_index, "class_descriptor": descriptor, "method_name": method_name, "method_descriptor": method_descriptor, "method_code_offset_bytes": offset, "opcode": str(ins.get_name()) if hasattr(ins, "get_name") else type(ins).__name__, "operands": str(ins.get_output())[:2000] if hasattr(ins, "get_output") else "", "length_bytes": length, "evidence_type": "androguard_instruction"})
+                                        opcode = str(ins.get_name()) if hasattr(ins, "get_name") else type(ins).__name__
+                                        operands = str(ins.get_output())[:2000] if hasattr(ins, "get_output") else ""
+                                        writers["instructions"].write({"dex_index": dex_index, "class_descriptor": descriptor, "method_name": method_name, "method_descriptor": method_descriptor, "method_code_offset_bytes": offset, "opcode": opcode, "operands": operands, "length_bytes": length, "evidence_type": "androguard_instruction"})
+                                        if opcode.startswith("invoke-"):
+                                            target = _parse_method_reference(operands)
+                                            if target is not None:
+                                                if writers["references"].count < MAX_REFERENCE_ROWS:
+                                                    writers["references"].write({"dex_index": dex_index, "caller_class_descriptor": descriptor, "caller_method_name": method_name, "caller_method_descriptor": method_descriptor, "method_code_offset_bytes": offset, **target, "evidence_type": "invoke_instruction_operand", "resolution": "symbolic_target_only"})
+                                                else:
+                                                    references_truncated = True
                                         offset += max(0, length)
                                         count += 1
                                 except Exception as exc:
@@ -277,7 +336,9 @@ def _androguard_extract(apk_path: Path, output_dir: Path, max_methods: int | Non
                         except Exception as exc:
                             row["code_extraction_error"] = f"{type(exc).__name__}: {exc}"
                         writers["methods"].write(row)
-            status.update({"status": "ok", "dex_objects": len(dexes), "classes": writers["classes"].count, "methods": writers["methods"].count, "instructions": writers["instructions"].count, "references": writers["references"].count, "truncated": truncated, "cross_references": "disabled_for_performance"})
+            status.update({"status": "ok", "dex_objects": len(dexes), "classes": writers["classes"].count, "methods": writers["methods"].count, "instructions": writers["instructions"].count, "references": writers["references"].count, "truncated": truncated, "references_truncated": references_truncated, "cross_references": "bounded_instruction_operand_scan"})
+            if references_truncated:
+                status["reference_note"] = f"Reference output reached the {MAX_REFERENCE_ROWS} row cap; additional invoke targets were omitted."
             if truncated:
                 status["note"] = f"Class inventory completed; method and instruction output truncated at --max-methods={max_methods}. Remaining methods and instructions were not emitted."
         except Exception as exc:
@@ -347,33 +408,78 @@ _METHOD_EVIDENCE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 
 def _method_level_evidence(instructions_path: Path, limit_per_rule: int = 100) -> dict[str, list[dict[str, Any]]]:
-    """Link API-pattern indicators to the class and method containing an instruction."""
+    """Link API indicators to methods, preserving offsets and aggregating repeats."""
     evidence: dict[str, list[dict[str, Any]]] = {rule_id: [] for rule_id, _ in _METHOD_EVIDENCE_PATTERNS}
-    if not instructions_path.is_file():
+    seen: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {
+        rule_id: {} for rule_id, _ in _METHOD_EVIDENCE_PATTERNS
+    }
+    if not instructions_path.is_file() or limit_per_rule <= 0:
         return evidence
+
     with instructions_path.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            # Method evidence must be traceable to a concrete DEX method. Without
+            # this identity, unrelated malformed/legacy rows would share one
+            # all-None deduplication key.
+            if any(
+                row.get(key) is None or not str(row.get(key)).strip()
+                for key in ("dex_index", "class_descriptor", "method_name", "method_descriptor")
+            ):
                 continue
             searchable = " ".join(str(row.get(key) or "") for key in ("operands", "opcode"))
             if not searchable.strip():
                 continue
+
             for rule_id, pattern in _METHOD_EVIDENCE_PATTERNS:
-                if len(evidence[rule_id]) >= limit_per_rule or not pattern.search(searchable):
+                if not pattern.search(searchable):
                     continue
-                evidence[rule_id].append({
+                # One record per rule and method: repeated API instructions increase
+                # occurrence metadata instead of flooding the report.
+                key = (
+                    row.get("dex_index"),
+                    row.get("class_descriptor"),
+                    row.get("method_name"),
+                    row.get("method_descriptor"),
+                )
+                existing = seen[rule_id].get(key)
+                offset = row.get("method_code_offset_bytes")
+                if existing is not None:
+                    existing["occurrences"] += 1
+                    offsets = existing["additional_instruction_offsets_bytes"]
+                    if offset is not None and offset != existing.get("method_code_offset_bytes") and offset not in offsets and len(offsets) < 10:
+                        offsets.append(offset)
+                    continue
+                if len(evidence[rule_id]) >= limit_per_rule:
+                    continue
+                operands = str(row.get("operands") or "")
+                target = _parse_method_reference(operands)
+                item = {
                     "dex_index": row.get("dex_index"),
                     "class_descriptor": row.get("class_descriptor"),
                     "method_name": row.get("method_name"),
                     "method_descriptor": row.get("method_descriptor"),
+                    "method_code_offset_bytes": offset,
+                    "additional_instruction_offsets_bytes": [],
+                    "occurrences": 1,
                     "opcode": row.get("opcode"),
-                    "operands": str(row.get("operands") or "")[:500],
+                    "operands": operands[:500],
                     "evidence_type": "androguard_instruction_api_reference",
-                })
+                }
+                if target is not None:
+                    item["target_class_descriptor"] = target["target_class_descriptor"]
+                    item["target_method_name"] = target["target_method_name"]
+                    item["target_method_descriptor"] = target["target_method_descriptor"]
+                    item["target_resolution"] = "symbolic_target_only"
+                evidence[rule_id].append(item)
+                seen[rule_id][key] = item
     return evidence
 
 
@@ -507,6 +613,13 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
             (output_dir / filename).write_text("", encoding="utf-8")
     dex_coverage = _dex_coverage_summary(dex_rows, androguard_status, output_dir / "classes.jsonl")
     coverage_warnings = []
+    if run_androguard and androguard_status.get("status") != "ok":
+        coverage_warnings.append({
+            "kind": "androguard_extraction_incomplete",
+            "status": androguard_status.get("status"),
+            "error": androguard_status.get("error"),
+            "note": androguard_status.get("note"),
+        })
     if dex_coverage["dex_count_matches_archive"] is False:
         coverage_warnings.append({
             "kind": "dex_count_mismatch",
@@ -542,12 +655,36 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
         tools.append(_run_tool("apktool", ["apktool", "d", "-f", str(apk_path), "-o", str(output_dir / "apktool")], log_dir, timeout=600, java_opts="-Xmx2g"))
         tools.append(_run_tool("apkid", ["apkid", str(apk_path)], log_dir, timeout=180))
 
+    failed_tools = [row for row in tools if row.get("status") in {"error", "timeout"}]
+    if failed_tools:
+        findings.append({
+            "id": "optional_tool_failures",
+            "severity": "warning",
+            "category": "coverage",
+            "claim_type": "observed_fact",
+            "message": "One or more optional analysis tools failed or timed out; inspect tool logs and interpret their outputs as potentially incomplete.",
+            "evidence": [
+                {
+                    "tool": row.get("tool"),
+                    "status": row.get("status"),
+                    "exit_code": row.get("exit_code"),
+                    "reason": row.get("reason"),
+                    "stderr_log": row.get("stderr_log"),
+                    "stdout_tail": _read_log_tail(output_dir / row["stdout_log"]) if row.get("stdout_log") else None,
+                    "stderr_tail": _read_log_tail(output_dir / row["stderr_log"]) if row.get("stderr_log") else None,
+                }
+                for row in failed_tools
+            ][:100],
+            "confidence": "high",
+            "limitations": "A tool failure does not imply the APK is malicious; it reduces coverage for that tool's analysis.",
+        })
+
     versions = {"apkintel": __version__, "python": sys.version.split()[0], "androguard": None}
     try:
         versions["androguard"] = importlib.metadata.version("androguard")
     except importlib.metadata.PackageNotFoundError:
         pass
-    tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
+    tool_inventory = {"jadx": tool_version("jadx"), "apktool": tool_version("apktool"), "apkid": tool_version("apkid", distribution="apkid"), "androguard": {"available": androguard_status.get("available", False), "status": androguard_status.get("status")}}
     manifest = {"schema_version": "1.0", "tool": "APK Intelligence", "tool_version": __version__, "analysis_started_utc": run_started, "analysis_finished_utc": datetime.now(timezone.utc).isoformat(), "sample": {"filename": apk_path.name, "size_bytes": apk_path.stat().st_size, "sha256": sample_sha256, "sha1": hashes["sha1"], "md5": hashes["md5"]}, "archive": archive_summary, "tool_versions": versions, "tool_inventory": tool_inventory, "androguard_extraction": androguard_status, "app_metadata": androguard_status.get("app_metadata"), "optional_tools": tools, "coverage": {"static_only": True, "apk_executed": False, "decompilation_is_lossless": False, "native_analysis": "fingerprints only in initial version", "string_offsets": "approximate byte offsets of printable ASCII sequences", "androguard_enabled": run_androguard, "max_methods": max_methods, "androguard_truncated": bool(androguard_status.get("truncated")), "dex_inventory": dex_coverage, "coverage_warnings": coverage_warnings, "strings_truncated": strings_truncated, "skipped_or_truncated_files": skipped_or_truncated, "notes": ["APK files are never executed.", "Archive members are hashed and scanned in chunks; printable strings are extracted only from text-like files, DEX, and native libraries.", "Packed/encrypted payloads and runtime-loaded code may not be visible.", "Pattern matches are indicators, not proof of malicious behavior.", "DEX raw-header hashes are exact; class/method inventory depends on optional parser support."] + (["Printable-string output was capped at MAX_STRING_ROWS."] if strings_truncated else []) + ([androguard_status["note"]] if androguard_status.get("truncated") and androguard_status.get("note") else [])}}
 
     _jsonl(output_dir / "files.jsonl", files)

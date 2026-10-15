@@ -18,6 +18,23 @@ def _findings(output: Path) -> list[dict]:
     return json.loads((output / "findings.json").read_text(encoding="utf-8"))["findings"]
 
 
+
+def test_parse_method_reference_from_invoke_operands() -> None:
+    parsed = cli._parse_method_reference(
+        "v0, Lcom/example/PluginLoader;->loadPlugin(Ljava/lang/String;)V"
+    )
+
+    assert parsed == {
+        "target_class_descriptor": "Lcom/example/PluginLoader;",
+        "target_method_name": "loadPlugin",
+        "target_method_descriptor": "(Ljava/lang/String;)V",
+    }
+
+
+def test_parse_method_reference_ignores_non_method_operands() -> None:
+    assert cli._parse_method_reference("v0, v1") is None
+    assert cli._parse_method_reference("Lcom/example/Plugin;->field:Ljava/lang/String;") is None
+
 def test_large_dex_is_scanned_for_patterns_and_strings(tmp_path: Path) -> None:
     apk = tmp_path / "large.apk"
     # Place the marker across the chunk boundary to exercise overlap handling.
@@ -167,7 +184,8 @@ def test_method_level_evidence_links_api_reference_to_method(tmp_path: Path) -> 
             "method_name": "loadPlugin",
             "method_descriptor": "()V",
             "opcode": "invoke-virtual",
-            "operands": "Ldalvik/system/DexClassLoader;",
+            "operands": "v0, Ldalvik/system/DexClassLoader;-><init>(Ljava/lang/ClassLoader;)V",
+            "method_code_offset_bytes": 42,
         }) + "\n"
         + "not valid json\n",
         encoding="utf-8",
@@ -180,7 +198,64 @@ def test_method_level_evidence_links_api_reference_to_method(tmp_path: Path) -> 
     assert item["class_descriptor"] == "Lexample/Loader;"
     assert item["method_name"] == "loadPlugin"
     assert item["dex_index"] == 1
+    assert item["method_code_offset_bytes"] == 42
+    assert item["occurrences"] == 1
     assert item["evidence_type"] == "androguard_instruction_api_reference"
+    assert item["target_class_descriptor"] == "Ldalvik/system/DexClassLoader;"
+    assert item["target_method_name"] == "<init>"
+    assert item["target_method_descriptor"] == "(Ljava/lang/ClassLoader;)V"
+    assert item["target_resolution"] == "symbolic_target_only"
+
+
+def test_method_level_evidence_aggregates_repeated_api_hits_and_keeps_offsets(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.jsonl"
+    base = {
+        "dex_index": 0,
+        "class_descriptor": "Lexample/Loader;",
+        "method_name": "loadPlugin",
+        "method_descriptor": "()V",
+        "opcode": "invoke-virtual",
+        "operands": "Ldalvik/system/DexClassLoader;",
+    }
+    rows = [
+        {**base, "method_code_offset_bytes": 10},
+        {**base, "method_code_offset_bytes": 24},
+        {**base, "method_code_offset_bytes": 24},
+    ]
+    instructions.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows) + json.dumps(["not", "an", "instruction"]) + "\n",
+        encoding="utf-8",
+    )
+
+    evidence = cli._method_level_evidence(instructions)["dynamic_code_loading"]
+
+    assert len(evidence) == 1
+    assert evidence[0]["method_code_offset_bytes"] == 10
+    assert evidence[0]["additional_instruction_offsets_bytes"] == [24]
+    assert evidence[0]["occurrences"] == 3
+
+
+def test_method_level_evidence_skips_rows_without_method_identity(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.jsonl"
+    rows = [
+        {"opcode": "invoke-virtual", "operands": "Ldalvik/system/DexClassLoader;"},
+        {"opcode": "invoke-virtual", "operands": "Ldalvik/system/PathClassLoader;"},
+        {
+            "dex_index": 0,
+            "class_descriptor": "Lexample/Loader;",
+            "method_name": "loadPlugin",
+            "method_descriptor": "()V",
+            "opcode": "invoke-virtual",
+            "operands": "Ldalvik/system/DexClassLoader;",
+        },
+    ]
+    instructions.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    evidence = cli._method_level_evidence(instructions)["dynamic_code_loading"]
+
+    assert len(evidence) == 1
+    assert evidence[0]["class_descriptor"] == "Lexample/Loader;"
+    assert evidence[0]["occurrences"] == 1
 
 
 def test_method_level_evidence_is_bounded_and_attached(tmp_path: Path) -> None:
@@ -230,3 +305,95 @@ def test_optional_tool_outputs_use_report_root_for_relative_output_dir(tmp_path:
     assert calls[1][1][5] == str(report_root / "apktool")
     assert (report_root / "manifest.json").is_file()
     assert not (report_root / "analysis-output").exists()
+
+
+def test_optional_tool_failure_is_reported_as_coverage_warning(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "sample.apk"
+    _make_apk(apk, {"AndroidManifest.xml": b"<manifest/>"})
+    output = tmp_path / "out"
+
+    def fake_run_tool(name, argv, log_dir, **kwargs):
+        if name == "jadx":
+            (log_dir / "jadx.stderr.txt").write_text("decoder failed: unsupported instruction", encoding="utf-8")
+            (log_dir / "jadx.stdout.txt").write_text("partial output retained", encoding="utf-8")
+            return {
+                "tool": name,
+                "status": "error",
+                "exit_code": 3,
+                "stderr_log": "tool-logs/jadx.stderr.txt",
+                "stdout_log": "tool-logs/jadx.stdout.txt",
+            }
+        return {"tool": name, "status": "ok"}
+
+    monkeypatch.setattr(cli, "_run_tool", fake_run_tool)
+    cli.analyze_apk(apk, output, run_optional_tools=True, run_androguard=False)
+
+    findings = _findings(output)
+    failure = next(item for item in findings if item["id"] == "optional_tool_failures")
+    assert failure["severity"] == "warning"
+    assert failure["category"] == "coverage"
+    assert failure["evidence"][0]["tool"] == "jadx"
+    assert failure["evidence"][0]["exit_code"] == 3
+    assert "unsupported instruction" in failure["evidence"][0]["stderr_tail"]
+    assert "partial output retained" in failure["evidence"][0]["stdout_tail"]
+
+
+def test_tool_version_uses_package_metadata_when_requested(monkeypatch) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda command: "/usr/bin/apkid")
+    monkeypatch.setattr(cli.importlib.metadata, "version", lambda distribution: "3.3.0")
+
+    result = cli.tool_version("apkid", distribution="apkid")
+
+    assert result == {
+        "available": True,
+        "path": "/usr/bin/apkid",
+        "version": "3.3.0",
+    }
+
+
+def test_tool_version_does_not_report_failed_probe_as_version(monkeypatch) -> None:
+    class Result:
+        stdout = ""
+        stderr = "unrecognized arguments: --version"
+        returncode = 2
+
+    monkeypatch.setattr(cli.shutil, "which", lambda command: "/usr/bin/tool")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: Result())
+
+    result = cli.tool_version("tool")
+
+    assert result["available"] is True
+    assert result["version"] is None
+    assert result["version_probe_exit_code"] == 2
+    assert "unrecognized arguments" in result["version_probe_output"]
+
+
+def test_androguard_parse_failure_is_reported_as_coverage_warning(tmp_path: Path, monkeypatch) -> None:
+    apk = tmp_path / "sample.apk"
+    _make_apk(apk, {"classes.dex": b"dex\n035\x00" + b"\x00" * 112})
+    output = tmp_path / "out"
+
+    def fake_extract(apk_path, output_dir, max_methods=100_000):
+        for filename in ("classes.jsonl", "methods.jsonl", "instructions.jsonl", "references.jsonl"):
+            (output_dir / filename).write_text("", encoding="utf-8")
+        return {
+            "available": True,
+            "status": "error",
+            "error": "Androguard parse failed: ValueError: malformed DEX",
+            "max_methods": max_methods,
+        }
+
+    monkeypatch.setattr(cli, "_androguard_extract", fake_extract)
+    cli.analyze_apk(apk, output, run_optional_tools=False, run_androguard=True)
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["androguard_extraction"]["status"] == "error"
+    assert any(
+        warning["kind"] == "androguard_extraction_incomplete"
+        and warning["status"] == "error"
+        for warning in manifest["coverage"]["coverage_warnings"]
+    )
+    findings = _findings(output)
+    coverage = next(item for item in findings if item["id"] == "dex_inventory_coverage_mismatch")
+    assert coverage["severity"] == "warning"
+    assert any(item["kind"] == "androguard_extraction_incomplete" for item in coverage["evidence"])

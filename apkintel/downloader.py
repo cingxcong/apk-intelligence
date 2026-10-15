@@ -86,6 +86,10 @@ def download_apk(url: str, destination: str | Path, max_bytes: int = DEFAULT_MAX
                     print(f"[apkintel] Download progress: {progress}.", file=sys.stderr, flush=True)
                     last_progress = now
                     next_progress = total + 10 * 1024 * 1024
+        if expected_bytes is not None and total != expected_bytes:
+            raise ValueError(
+                f"Incomplete download: server declared {expected_bytes:,} bytes but sent {total:,} bytes."
+            )
         if total < 8:
             raise ValueError("Downloaded file is too small to be a valid APK.")
         with temporary.open("rb") as handle:
