@@ -206,6 +206,20 @@ def _scan_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, collect_strings
         emit_string(bytes(carry), carry_start)
     return {"sha256": digest.hexdigest(), "bytes_read": total, "prefix": bytes(prefix), "strings": strings, "strings_truncated": strings_truncated, "pattern_hits": hits}
 
+def _read_log_tail(path: Path, max_chars: int = 4000) -> str | None:
+    """Return a bounded diagnostic tail without loading a potentially huge log."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - max_chars * 4))
+            data = handle.read()
+        text = data.decode("utf-8", errors="replace").strip()
+        return text[-max_chars:] or None
+    except OSError:
+        return None
+
+
 def _run_tool(name: str, argv: list[str], log_dir: Path, timeout: int = 900, java_opts: str | None = None) -> dict[str, Any]:
     executable = shutil.which(argv[0])
     record: dict[str, Any] = {"tool": name, "available": bool(executable), "command": argv, "status": "skipped", "timeout_seconds": timeout}
@@ -656,6 +670,8 @@ def analyze_apk(apk_path: Path, output_dir: Path, run_optional_tools: bool = Tru
                     "exit_code": row.get("exit_code"),
                     "reason": row.get("reason"),
                     "stderr_log": row.get("stderr_log"),
+                    "stdout_tail": _read_log_tail(output_dir / row["stdout_log"]) if row.get("stdout_log") else None,
+                    "stderr_tail": _read_log_tail(output_dir / row["stderr_log"]) if row.get("stderr_log") else None,
                 }
                 for row in failed_tools
             ][:100],
