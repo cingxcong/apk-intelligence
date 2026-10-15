@@ -176,10 +176,18 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: apk-intelligence-report-${{ github.run_id }}
+          # Keep structured evidence and human-readable source, but omit bulky binary
+          # resources copied by Apktool (images, fonts, media, and other assets).
           path: |
-            analysis-output/**
-            !analysis-output/sample.apk
-            !analysis-output/input/sample.apk
+            analysis-output/*.json
+            analysis-output/*.jsonl
+            analysis-output/*.md
+            analysis-output/tool-logs/**
+            analysis-output/jadx/sources/**/*.java
+            analysis-output/apktool/AndroidManifest.xml
+            analysis-output/apktool/apktool.yml
+            analysis-output/apktool/smali*/**/*.smali
+            analysis-output/apktool/res/**/*.xml
             !analysis-output/**/*.apk
           if-no-files-found: warn
           retention-days: 7
