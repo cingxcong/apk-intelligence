@@ -14,7 +14,7 @@
 | `strings.jsonl` | Printable string candidates with source archive path and approximate character offset |
 | `findings.json` | Structured findings and evidence objects |
 | `summary.md` | Compact analyst and AI orientation |
-| `tool-logs/` | Captured output from optional tools |
+| `tool-logs/` | Captured output from optional tools; the manifest includes bounded error-line samples, log sizes, elapsed time, and JADX's reported error count when present |
 
 ## Claim types
 
@@ -25,7 +25,7 @@
 
 ## Evidence quality
 
-Hashes identify exact byte sequences. Archive paths identify the evidence container. DEX header offsets are exact. Instruction offsets, when available, are offsets within the method's code stream, not absolute offsets in the APK or DEX file. Printable string offsets are explicitly approximate character positions in decoded text; they are not byte or instruction offsets. Class/method/reference rows depend on parser compatibility and must be read alongside `manifest.json` coverage status.
+Hashes identify exact byte sequences. Archive paths identify the evidence container. DEX header offsets are exact. Instruction offsets, when available, are offsets within the method's code stream, not absolute offsets in the APK or DEX file. Printable string offsets are explicitly approximate character positions in decoded text; they are not byte or instruction offsets. Class/method/reference rows depend on parser compatibility and must be read alongside `manifest.json` coverage status. The `coverage.method_coverage` object counts methods emitted, methods with/without code, code/instruction extraction errors, and bounded examples of method-level failures. A parser-level `status: ok` does not mean every method was extracted without errors. Optional tool records include log diagnostics and elapsed time; JADX's reported error count is diagnostic metadata, not a root-cause diagnosis.
 
 ## Security limits
 
